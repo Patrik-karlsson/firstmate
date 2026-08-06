@@ -110,10 +110,13 @@ fi
 
 # --- status log ------------------------------------------------------------
 
-# Last non-empty status line, and its leading verb (the word before the colon).
+# Last state-bearing status line, and its leading verb (the word before the
+# colon). Delegates to fm-classify-lib.sh's last_status_line so the "which line
+# describes this task" rule - including its transparency to the non-blocking
+# friction verb - has one owner rather than a second tail here that could drift.
 log_last_line() {
   [ -f "$LOG" ] || return 1
-  grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
+  last_status_line "$LOG"
 }
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):

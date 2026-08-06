@@ -633,6 +633,53 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   pass "fm-brief.sh: Herdr lab contract covers scouts and rejects secondmate misuse"
 }
 
+# Every scaffold has to TEACH the non-blocking friction verb, because a worker
+# whose instinct is "nothing is blocked, so say nothing" never discovers it, and
+# a signature only becomes actionable once a second task independently hits it.
+# The payload rule is teaching, not filtering: the collector's only input is the
+# worker's own sentence, so the brief is where the boundary is set.
+test_friction_verb_is_taught_in_all_brief_scaffolds() {
+  local home kind id brief
+  home="$TMP_ROOT/friction-verb-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout secondmate; do
+    id="brief-friction-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" FM_CLASSIFY_FRICTION_VERB=resistance \
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" FM_CLASSIFY_FRICTION_VERB=resistance \
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_CLASSIFY_FRICTION_VERB=resistance \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_grep 'resistance: [sig=<stable-slug>]' "$brief" \
+      "$kind brief did not teach the configured friction verb and its signature grammar"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_no_grep '`friction: [sig=<stable-slug>]' "$brief" \
+      "$kind brief still teaches the default friction verb under an override"
+    assert_grep "It declares no state" "$brief" \
+      "$kind brief did not tell the worker that friction changes nothing"
+    assert_grep "name the thing that would REPEAT" "$brief" \
+      "$kind brief did not require a repeatable signature rather than an instance"
+    assert_grep "path CLASS" "$brief" \
+      "$kind brief did not carry the payload boundary for friction observations"
+    # The states list is unchanged: friction is deliberately NOT a state, and
+    # listing it beside the real ones would teach the wrong thing.
+    assert_grep "States: working, needs-decision, blocked, paused, done, failed." "$brief" \
+      "$kind brief altered the state vocabulary while adding the friction verb"
+  done
+  pass "fm-brief.sh: every scaffold teaches the non-blocking friction verb without changing the states"
+}
+
 test_pause_verb_override_renders_all_brief_scaffolds() {
   local home kind id brief
   home="$TMP_ROOT/pause-verb-home"
@@ -728,5 +775,6 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_friction_verb_is_taught_in_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

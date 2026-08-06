@@ -192,9 +192,13 @@ meta_value() {  # <meta-file> <key>
   fm_meta_get "$1" "$2"
 }
 
-last_nonempty_line() {  # <file>
+# Last state-bearing status line. fm-classify-lib.sh's last_status_line owns the
+# rule, including skipping the non-blocking friction verb so a friction append
+# never becomes a task's reported last event (and, through bearings, its
+# `doing`). Friction has its own surface below.
+last_nonempty_line() {  # <status-file>
   [ -f "$1" ] || return 1
-  grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
+  last_status_line "$1"
 }
 
 crew_state_json() {  # <id>
@@ -1345,6 +1349,28 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
+# Friction records for this home, from their one owner (bin/fm-friction.sh).
+# A PURE READ: the canonical snapshot never ingests, so read-only surfaces built
+# on it - /bearings above all - stay read-only.
+#
+# On any failure this reports available:false with a reason rather than an empty
+# section. A friction surface that cannot tell "nothing was recorded" from
+# "could not be read" is exactly the blind section the three counts exist to
+# prevent, so the distinction has to survive into the model.
+friction_json() {
+  local out
+  if out=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+             FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+             "$SCRIPT_DIR/fm-friction.sh" list --json 2>/dev/null) \
+     && printf '%s' "$out" | jq -e 'type == "object" and has("counts")' >/dev/null 2>&1; then
+    printf '%s' "$out" | jq '. + {available:true}'
+    return 0
+  fi
+  jq -n '{available:false, reason:"friction records could not be read",
+          counts:{surfaced:0,suppressed:0,unclassified:0,settled:0},
+          records:[], records_total:0, records_truncated:0}'
+}
+
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
@@ -1355,6 +1381,7 @@ if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
 fi
 
 SCOUT_REPORTS_JSON=$(scout_report_lines)
+FRICTION_JSON=$(friction_json)
 MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
@@ -1374,6 +1401,7 @@ jq -n \
   --argjson tasks "$TASKS_JSON" \
   --argjson main_inventory "$MAIN_INVENTORY_JSON" \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
+  --argjson friction "$FRICTION_JSON" \
   --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
   --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
   'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
@@ -1388,6 +1416,7 @@ jq -n \
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
+     friction:$friction,
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
      secondmate_guidance:{

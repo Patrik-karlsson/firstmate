@@ -53,7 +53,16 @@
 #   --all-recorded-prs include every locally recorded PR
 #   --all-unhealthy  include every unhealthy endpoint
 #   --all-pr-repos   query every discovered repository under --include-prs
+#   --all-friction   include every surfaced friction signature
 #   -h,--help        usage
+#
+# The friction surface reports the three mandatory counts as flat scalar fields
+# (friction_surfaced, friction_suppressed, friction_unclassified) plus
+# friction_settled, ALWAYS, including when every one is zero. They are flat
+# rather than a nested counts object because the TOON encoder below renders only
+# scalars and arrays of uniform scalar objects, and a nested object would come
+# out as an opaque quoted blob. Without those counts a quiet friction section is
+# indistinguishable from a blind one.
 #
 # Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
 set -u
@@ -74,6 +83,7 @@ FM_BEARINGS_GATES=${FM_BEARINGS_GATES:-20}
 FM_BEARINGS_REPORTS=${FM_BEARINGS_REPORTS:-20}
 FM_BEARINGS_RECORDED_PRS=${FM_BEARINGS_RECORDED_PRS:-20}
 FM_BEARINGS_UNHEALTHY=${FM_BEARINGS_UNHEALTHY:-20}
+FM_BEARINGS_FRICTION=${FM_BEARINGS_FRICTION:-10}
 FM_BEARINGS_PR_REPOS=${FM_BEARINGS_PR_REPOS:-10}
 FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
@@ -90,6 +100,7 @@ validate_bound FM_BEARINGS_GATES "$FM_BEARINGS_GATES"
 validate_bound FM_BEARINGS_REPORTS "$FM_BEARINGS_REPORTS"
 validate_bound FM_BEARINGS_RECORDED_PRS "$FM_BEARINGS_RECORDED_PRS"
 validate_bound FM_BEARINGS_UNHEALTHY "$FM_BEARINGS_UNHEALTHY"
+validate_bound FM_BEARINGS_FRICTION "$FM_BEARINGS_FRICTION"
 validate_bound FM_BEARINGS_PR_REPOS "$FM_BEARINGS_PR_REPOS"
 validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 
@@ -100,7 +111,7 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
                                [--all-secondmates] [--all-landed]
                                [--all-reports] [--all-queued]
                                [--all-recorded-prs] [--all-unhealthy]
-                               [--all-pr-repos]
+                               [--all-pr-repos] [--all-friction]
 
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
@@ -109,7 +120,13 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
-  unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+  unhealthy_endpoints{...} (only when non-empty),
+  friction_surfaced, friction_suppressed, friction_unclassified,
+  friction_settled, friction{sig,state,security,tasks,count,outcomes,last},
+  omitted{surface,reveal}.
+The four friction count fields always render, including when all are zero: a
+  quiet friction section must be distinguishable from a blind one. friction[]
+  carries surfaced signatures plus the unattributable aggregate row.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -121,7 +138,7 @@ For every registered secondmate, readable structured facts from its own home are
   evidence and never become current work.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
   --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
-  --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
+  --all-unhealthy, --all-pr-repos, --all-friction, --include-prs (adds candidate_prs).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 EOF
 }
@@ -137,6 +154,7 @@ ALL_LANDED=0
 ALL_RECORDED_PRS=0
 ALL_UNHEALTHY=0
 ALL_PR_REPOS=0
+ALL_FRICTION=0
 FIELDS=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -151,6 +169,7 @@ while [ $# -gt 0 ]; do
     --all-recorded-prs) ALL_RECORDED_PRS=1 ;;
     --all-unhealthy) ALL_UNHEALTHY=1 ;;
     --all-pr-repos) ALL_PR_REPOS=1 ;;
+    --all-friction) ALL_FRICTION=1 ;;
     --fields) shift; FIELDS=${1:-} ;;
     --fields=*) FIELDS=${1#--fields=} ;;
     -h|--help) usage; exit 0 ;;
@@ -285,6 +304,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson reports_n "$FM_BEARINGS_REPORTS" \
   --argjson recorded_prs_n "$FM_BEARINGS_RECORDED_PRS" \
   --argjson unhealthy_n "$FM_BEARINGS_UNHEALTHY" \
+  --argjson friction_n "$FM_BEARINGS_FRICTION" \
+  --argjson all_friction "$ALL_FRICTION" \
   --argjson include_prs "$INCLUDE_PRS" \
   --argjson all_in_flight "$ALL_IN_FLIGHT" \
   --argjson all_decisions "$ALL_DECISIONS" \
@@ -417,6 +438,16 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
   | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
+  | (.friction // {}) as $friction
+  | ([ ($friction.records // [])[]
+       | select(.surfaced == true or .state == "unclassified")
+       | {sig,
+          state,
+          security:(.security // false),
+          tasks:((.tasks // []) | length),
+          count,
+          outcomes:(((.outcomes // []) | if length > 0 then join("/") else "-" end)),
+          last:(((.observations // []) | if length > 0 then .[-1].text else "-" end) | trunc(70))} ]) as $friction_all
   | . as $snap
   | {
       schema: "fm-bearings.v1",
@@ -430,7 +461,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                             artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),
       gates: (if $all_queued == 1 then $gates_all else $gates_all[:$gates_n] end),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
-      recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
+      recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end),
+      friction_surfaced: ($friction.counts.surfaced // 0),
+      friction_suppressed: ($friction.counts.suppressed // 0),
+      friction_unclassified: ($friction.counts.unclassified // 0),
+      friction_settled: ($friction.counts.settled // 0),
+      friction: (if $all_friction == 1 then $friction_all else $friction_all[:$friction_n] end)
     }
   | . + (if ($unhealthy_all | length) > 0 then
            {unhealthy_endpoints:(if $all_unhealthy == 1 then $unhealthy_all else $unhealthy_all[:$unhealthy_n] end)}
@@ -470,6 +506,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_unhealthy == 0 and ($unhealthy_all | length) > $unhealthy_n then {surface:("unhealthy_endpoints showing \($unhealthy_n) of \($unhealthy_all | length)"), reveal:"--all-unhealthy"} else empty end),
         (if $include_prs == 1 and $pr_repos_total > $pr_repos_shown then {surface:("PR repositories showing \($pr_repos_shown) of \($pr_repos_total)"), reveal:"--all-pr-repos"} else empty end),
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
+        (if $all_friction == 0 and ($friction_all | length) > $friction_n then {surface:("friction showing \($friction_n) of \($friction_all | length)"), reveal:"--all-friction"} else empty end),
+        (($friction.records_truncated // 0) as $n | if $n > 0 then {surface:("friction records omitted by the record bound: \($n)"), reveal:"raise FM_FRICTION_RECORDS"} else empty end),
+        (if $friction.available == false then {surface:("friction records unavailable: " + ($friction.reason // "read failed")), reveal:"run bin/fm-friction.sh list"} else empty end),
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }
 
