@@ -12,11 +12,13 @@ disable_project_settings: true
 # Gate agent for THIS repository. The opt-out above only works if the gate agent
 # can actually be stripped of AGENTS.md/CLAUDE.md, so no-mistakes refuses to launch
 # one that cannot be, and a machine-wide default without that knob cannot validate
-# firstmate at all. Only codex, claude, and pi carry it. The list is ordered and
-# trusted-only exactly like disable_project_settings: resolution filters it to the
-# agents actually installed and the fallback wrapper reports neutralizing only if
-# every member does, so a contributor keeps whichever of the three they have
-# without any subset weakening the boundary. See docs/architecture.md
+# firstmate at all. Only codex, claude, and pi carry it. This is a code-executing
+# selection field, so it is read from the default-branch copy only while
+# allow_repo_commands stays false (the default), unlike disable_project_settings
+# above, which is trusted unconditionally. The list is ordered: resolution filters
+# it to the agents actually installed and the fallback wrapper reports neutralizing
+# only if every member does, so a contributor keeps whichever of the three they
+# have without any subset weakening the boundary. See docs/architecture.md
 # "No-mistakes gate authority boundary"; tests/fm-gate-refuse.test.sh pins the set.
 agent:
   - codex
