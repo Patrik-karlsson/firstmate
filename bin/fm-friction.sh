@@ -358,8 +358,8 @@ render_text() {  # <model-json>
     "counts: surfaced=\(.counts.surfaced) suppressed=\(.counts.suppressed) unclassified=\(.counts.unclassified) settled=\(.counts.settled)",
     "",
     (([.records[] | select(.surfaced and (.security | not))]) as $s
-     | if ($s | length) == 0 then "surfaced: none"
-       else ("surfaced:",
+     | if ($s | length) == 0 then "surfaced patterns: none"
+       else ("surfaced patterns:",
              ($s[] | "  \(.sig)  tasks=\(.tasks | length) count=\(.count)  outcomes: \(.outcomes | join(", "))",
                      "    last: \(.observations | last | .text)"))
        end),

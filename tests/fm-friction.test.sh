@@ -105,7 +105,7 @@ test_single_task_signature_is_recorded_not_surfaced() {
   ' >/dev/null || fail "a single-task signature must be recorded but not surfaced"
   [ "$(counts "$home")" = "0 1 0 0" ] \
     || fail "a single-task signature belongs in suppressed, got: $(counts "$home")"
-  assert_contains "$(fr "$home" list)" "surfaced: none" "text rendering must say nothing surfaced"
+  assert_contains "$(fr "$home" list)" "surfaced patterns: none" "text rendering must say nothing surfaced"
   pass "a signature seen in one task is recorded and never surfaced"
 }
 
@@ -245,9 +245,9 @@ test_guard_signature_surfaces_individually_with_its_caveat() {
   assert_contains "$text" "frequency is not evidence a guard is wrong" \
     "the guard section must carry the frequency caveat"
   # The ordinary signature stays in the batched pattern list; the guard does not.
-  printf '%s' "$text" | awk '/^surfaced:/{s=1;next} /^$/{s=0} s' | grep -qF "issue-scope-understated" \
+  printf '%s' "$text" | awk '/^surfaced patterns:/{s=1;next} /^$/{s=0} s' | grep -qF "issue-scope-understated" \
     || fail "the ordinary signature must appear in the batched surfaced list"
-  printf '%s' "$text" | awk '/^surfaced:/{s=1;next} /^$/{s=0} s' | grep -qF "secret-blocker-false-positive" \
+  printf '%s' "$text" | awk '/^surfaced patterns:/{s=1;next} /^$/{s=0} s' | grep -qF "secret-blocker-false-positive" \
     && fail "the guard signature must not be batched into the surfaced pattern list"
 
   draft=$(fr "$home" draft secret-blocker-false-positive --outcome keep)
