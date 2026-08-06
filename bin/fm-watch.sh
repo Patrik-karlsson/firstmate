@@ -471,8 +471,14 @@ scan_signals() {
 # counts as a friction-only delta; the previous size comes from the file's own
 # .seen-* signature, which the caller has not overwritten yet.
 pending_is_friction_only() {  # <scan_signals-records>
-  local records=$1 psf psig pf prev any=1
-  while IFS=$(printf '\t') read -r psf psig pf; do
+  local records=$1 rec tab psf pf prev any=1
+  tab=$(printf '\t')
+  while IFS= read -r rec; do
+    [ -n "$rec" ] || continue
+    # First and last fields of "<seen-file>\t<sig>\t<file>"; the middle
+    # signature is not needed here, and no path in this set contains a tab.
+    psf=${rec%%"$tab"*}
+    pf=${rec##*"$tab"}
     [ -n "$psf" ] || continue
     case "$pf" in *.status) ;; *) return 1 ;; esac
     prev=$(cat "$psf" 2>/dev/null || true)
@@ -929,7 +935,7 @@ EOF
     if afk_present; then
       signal_actionable=1
     elif pending_is_friction_only "$pending"; then
-      signal_absorb_note=friction-only
+      signal_absorb_note='friction-only'
     elif signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
       signal_actionable=1
     fi
