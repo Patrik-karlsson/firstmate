@@ -363,6 +363,50 @@ test_friction_is_transparent_to_state_readers() {
   pass "a friction line changes no task state and masks no other event"
 }
 
+# The predicate that lets a supervisor absorb a friction append. Every
+# uncertain case must fail CLOSED (report "not friction-only", so the wake
+# surfaces), because absorbing a real status is far worse than one extra wake.
+# tests/fm-watch-triage.test.sh covers the watcher end to end; these pin the
+# safety cases that are hard to reach from there.
+test_friction_only_delta_fails_closed() {
+  local dir log size
+  dir=$(mktemp -d "$TMP_ROOT/delta.XXXXXX")
+  log="$dir/task.status"
+
+  printf 'working: setup\n' > "$log"
+  size=$(LC_ALL=C wc -c < "$log" | tr -d ' ')
+  printf 'friction: [sig=x] something got in the way\n' >> "$log"
+  status_delta_is_friction_only "$log" "$size" \
+    || fail "a delta of only friction lines must be recognised"
+
+  # A real status in the same delta: never absorbed.
+  printf 'working: setup\n' > "$log"
+  size=$(LC_ALL=C wc -c < "$log" | tr -d ' ')
+  printf 'friction: [sig=x] got in the way\nneeds-decision: pick A or B\n' >> "$log"
+  ! status_delta_is_friction_only "$log" "$size" \
+    || fail "a delta containing a real status must never be treated as friction-only"
+
+  # A malformed friction line still counts as friction: it becomes an
+  # unclassified RECORD, and it is still not a state change worth waking for.
+  printf 'working: setup\n' > "$log"
+  size=$(LC_ALL=C wc -c < "$log" | tr -d ' ')
+  printf 'friction: no signature at all\n' >> "$log"
+  status_delta_is_friction_only "$log" "$size" \
+    || fail "a malformed friction line is still a friction-only delta"
+
+  # No recorded previous size (a first sighting), no growth, a shrunk file, and
+  # a missing file each fail closed.
+  ! status_delta_is_friction_only "$log" "" \
+    || fail "a first sighting with no recorded size must fail closed"
+  ! status_delta_is_friction_only "$log" "$(LC_ALL=C wc -c < "$log" | tr -d ' ')" \
+    || fail "a file that did not grow must fail closed"
+  ! status_delta_is_friction_only "$log" 999999 \
+    || fail "a shrunk file must fail closed"
+  ! status_delta_is_friction_only "$dir/absent.status" 0 \
+    || fail "a missing file must fail closed"
+  pass "the friction-only delta test fails closed on every uncertain case"
+}
+
 test_malformed_friction_line_is_still_inert() {
   local dir log
   dir=$(mktemp -d "$TMP_ROOT/malformed.XXXXXX")
@@ -471,6 +515,7 @@ test_cancelled_draft_returns_to_surfaced
 test_settled_signature_keeps_counting_and_never_resurfaces
 test_ingest_is_idempotent
 test_friction_is_transparent_to_state_readers
+test_friction_only_delta_fails_closed
 test_malformed_friction_line_is_still_inert
 test_friction_survives_teardown
 test_ingest_leaves_a_frictionless_home_untouched
