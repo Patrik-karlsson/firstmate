@@ -22,9 +22,12 @@
 # when it is itself executed inside the real no-mistakes gate (whose process has
 # NO_MISTAKES_GATE=1 and a gate-worktree cwd).
 #
-# Finally, assert firstmate's TRACKED .no-mistakes.yaml parses and sets
-# disable_project_settings: true (the trusted-only opt-out that neutralizes gate
-# agents' project instructions on the no-mistakes side).
+# Finally, assert firstmate's TRACKED .no-mistakes.yaml still carries both halves
+# of the no-mistakes side: disable_project_settings: true (the trusted-only
+# opt-out that neutralizes gate agents' project instructions) AND an `agent` pin
+# naming only agents that can actually be neutralized. The opt-out alone is not
+# enough - no-mistakes refuses to launch a gate agent without a neutralization
+# knob, so an agent outside that set does not weaken validation, it stops it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -361,6 +364,114 @@ test_teardown_refuses_and_admits() {
   pass "fm-teardown: refuses on marker and gate-worktree backstop; a normal teardown is unaffected"
 }
 
+# --- tracked .no-mistakes.yaml: the no-mistakes half of the boundary ---------
+#
+# NEUTRALIZING is the complete set of agents no-mistakes will launch as a gate
+# agent in a checkout that opted out of project settings. Everything else -
+# cursor, acp:*, copilot, opencode, rovodev, and the auto probe, which can
+# resolve to any of them - has no verified way to drop the target repo's
+# AGENTS.md, so no-mistakes refuses it rather than run it against firstmate's
+# captain identity. Keeping the tracked pin inside this set is what makes the
+# refusal a non-event here instead of a wedged pipeline.
+NEUTRALIZING="codex claude pi"
+
+# read_repo_agents <file> prints the repo config's configured gate agents, one
+# per line, and exits non-zero when the `agent` key is absent or written in a
+# shape it will not read. Failing closed matters more than breadth: a shape this
+# cannot parse must stop the suite, never silently yield an empty set that every
+# membership check below would then pass vacuously.
+read_repo_agents() {
+  awk '
+    # Track only top-level keys; nested mappings (document:, commands:, test:)
+    # have their own "agent"-like children we must never read as the repo pin.
+    /^[^[:space:]#]/ { top = ($0 ~ /^agent[[:space:]]*:/) }
+    top && /^agent[[:space:]]*:/ {
+      sub(/^agent[[:space:]]*:[[:space:]]*/, "")
+      if ($0 ~ /^\[.*\]$/) {                      # flow sequence
+        gsub(/^\[|\]$|[[:space:]]/, ""); n = split($0, a, ",")
+        for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
+        found = 1
+      } else if ($0 != "" && $0 !~ /^#/) {        # plain scalar
+        sub(/[[:space:]]*#.*$/, ""); print $0; found = 1
+      }
+      next
+    }
+    top && /^[[:space:]]+-[[:space:]]*/ {         # block sequence entry
+      sub(/^[[:space:]]*-[[:space:]]*/, ""); sub(/[[:space:]]*#.*$/, "")
+      if ($0 != "") { print $0; found = 1 }
+      next
+    }
+    top && /^[[:space:]]*$/ { next }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
+# assert_agents_neutralizing <file> <label> succeeds only when the file names at
+# least one gate agent and every one of them is in NEUTRALIZING.
+assert_agents_neutralizing() {
+  local file=$1 label=$2 agents name
+  agents=$(read_repo_agents "$file") \
+    || fail "$label: no readable 'agent' key - the gate-agent pin is missing or unparseable"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case " $NEUTRALIZING " in
+      *" $name "*) : ;;
+      *) fail "$label: gate agent '$name' cannot neutralize AGENTS.md; allowed: $NEUTRALIZING" ;;
+    esac
+  done <<EOF
+$agents
+EOF
+}
+
+test_tracked_gate_agent_is_neutralizing() {
+  local tracked="$ROOT/.no-mistakes.yaml" tmp fixture rc
+
+  # The reader must fire on known-bad input before its verdict on the tracked
+  # file means anything: a parser that quietly returns nothing would "pass" the
+  # real assertion while enforcing nothing at all.
+  tmp=$(fm_test_tmproot fm-gate-agent)
+
+  fixture="$tmp/absent.yaml"
+  printf 'disable_project_settings: true\n' > "$fixture"
+  rc=0; read_repo_agents "$fixture" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a config with no 'agent' key must not read as a configured pin"
+
+  fixture="$tmp/nested-only.yaml"
+  printf 'document:\n  agent: cursor\n' > "$fixture"
+  rc=0; read_repo_agents "$fixture" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a nested 'agent:' key must not be read as the top-level pin"
+
+  for fixture in \
+    'agent: cursor' \
+    'agent: [claude, cursor]' \
+    'agent:'$'\n''  - claude'$'\n''  - opencode' \
+    'agent: auto'
+  do
+    printf '%s\n' "$fixture" > "$tmp/bad.yaml"
+    rc=0
+    ( assert_agents_neutralizing "$tmp/bad.yaml" "fixture" >/dev/null 2>&1 ) || rc=$?
+    [ "$rc" -ne 0 ] || fail "a non-neutralizing agent was accepted: $fixture"
+  done
+
+  # ...and must accept the shapes a maintainer may legitimately write.
+  for fixture in \
+    'agent: claude' \
+    'agent: [codex, claude, pi]' \
+    'agent:'$'\n''  - codex'$'\n''  - claude'$'\n''  - pi'
+  do
+    printf '%s\n' "$fixture" > "$tmp/good.yaml"
+    assert_agents_neutralizing "$tmp/good.yaml" "fixture"
+  done
+
+  # The invariant itself.
+  assert_agents_neutralizing "$tracked" "tracked .no-mistakes.yaml"
+
+  # The pin is only meaningful while the opt-out it protects is still set.
+  assert_grep "disable_project_settings: true" "$tracked" \
+    "tracked .no-mistakes.yaml must keep the project-settings opt-out"
+  pass "tracked .no-mistakes.yaml keeps the opt-out and pins the gate agent to neutralizing agents only"
+}
+
 test_helper_env_marker_refuses
 test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
@@ -368,3 +479,4 @@ test_helper_normal_is_noop
 test_spawn_refuses_and_admits
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits
+test_tracked_gate_agent_is_neutralizing

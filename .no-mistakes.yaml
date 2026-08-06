@@ -9,6 +9,20 @@
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
+# Gate agent for THIS repository. The opt-out above only works if the gate agent
+# can actually be stripped of AGENTS.md/CLAUDE.md, so no-mistakes refuses to launch
+# one that cannot be, and a machine-wide default without that knob cannot validate
+# firstmate at all. Only codex, claude, and pi carry it. The list is ordered and
+# trusted-only exactly like disable_project_settings: resolution filters it to the
+# agents actually installed and the fallback wrapper reports neutralizing only if
+# every member does, so a contributor keeps whichever of the three they have
+# without any subset weakening the boundary. See docs/architecture.md
+# "No-mistakes gate authority boundary"; tests/fm-gate-refuse.test.sh pins the set.
+agent:
+  - codex
+  - claude
+  - pi
+
 # Trusted documentation placement policy for the Document step.
 # The audience inventory and coding guideline own the detail; keep this as a
 # pointer so gate instructions cannot become a second prose policy.

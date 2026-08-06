@@ -152,6 +152,8 @@ Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-
 
 Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.
 The tracked `.no-mistakes.yaml` sets `disable_project_settings: true`; no-mistakes honors that setting only from the trusted default-branch copy, so a pushed branch cannot enable its own project instructions during validation.
+The same file pins `agent` to the agents that opt-out can actually be applied to, because no-mistakes refuses to launch a gate agent it cannot strip of `AGENTS.md`; a machine-wide agent without that knob leaves this repo unvalidatable rather than merely less isolated.
+The pin is trusted-only on the same terms and is an ordered list, which resolution filters to the installed agents; `tests/fm-gate-refuse.test.sh` owns the allowed set and fails on any addition outside it.
 Independently, `fm-spawn.sh`, `fm-send.sh`, and `fm-teardown.sh` source `bin/fm-gate-refuse-lib.sh` and exit with status 3 before fleet mutation when the gate environment marker is present or the current checkout matches the default no-mistakes gate-repository topology.
 A normal primary checkout or crewmate worktree has neither signal and remains unaffected.
 The helper's header owns the exact signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.

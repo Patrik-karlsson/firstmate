@@ -959,6 +959,10 @@ families_for_changed_path() {
     .github/workflows/ci.yml|.no-mistakes.yaml)
       printf '%s\n' pure-contract-unit
       printf '%s\n' real-herdr-gated
+      # .no-mistakes.yaml also carries the gate-authority pin (the project-settings
+      # opt-out and the neutralizing-agent list) that tests/fm-gate-refuse.test.sh
+      # owns, so a config-only edit has to select that suite too.
+      printf '%s\n' session-bootstrap
       ;;
     docs/fm-test-portable-shards.md|docs/fm-test-isolation-proof.md|\
     docs/fm-test-isolation-proof.json)
