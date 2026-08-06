@@ -74,6 +74,11 @@
 # signature keeps counting and never re-surfaces, so friction that was accepted
 # once and later became severe is still visible on inspection.
 #
+# Scope: this home only. Records are keyed to the home's own data/ and state/,
+# so a signature hit once in the main home and once in a secondmate home does
+# NOT reach the threshold - each home counts its own. Cross-home aggregation is
+# deliberately not built here.
+#
 # Environment:
 #   FM_FRICTION_THRESHOLD      distinct tasks required to surface (default 2)
 #   FM_FRICTION_RECORDS        max records in the rendered model (default 50);
@@ -102,6 +107,12 @@ usage() {
 }
 
 die() { printf 'fm-friction: %s\n' "$1" >&2; exit 1; }
+
+# --help renders this script's header, which needs no jq: a box without jq must
+# still be able to read what this does and what the guard list contains.
+case "${1:-}" in
+  -h|--help|help) usage; exit 0 ;;
+esac
 
 command -v jq >/dev/null 2>&1 || die "jq not found"
 
@@ -346,11 +357,22 @@ render_text() {  # <model-json>
     "FRICTION (threshold: \(.threshold) distinct tasks)",
     "counts: surfaced=\(.counts.surfaced) suppressed=\(.counts.suppressed) unclassified=\(.counts.unclassified) settled=\(.counts.settled)",
     "",
-    (([.records[] | select(.surfaced)]) as $s
+    (([.records[] | select(.surfaced and (.security | not))]) as $s
      | if ($s | length) == 0 then "surfaced: none"
        else ("surfaced:",
-             ($s[] | "  \(.sig)\(if .security then "  [security]" else "" end)  tasks=\(.tasks | length) count=\(.count)  outcomes: \(.outcomes | join(", "))",
+             ($s[] | "  \(.sig)  tasks=\(.tasks | length) count=\(.count)  outcomes: \(.outcomes | join(", "))",
                      "    last: \(.observations | last | .text)"))
+       end),
+    # A guard signature is rendered in its OWN section rather than beside the
+    # ordinary patterns. Batching it into a ranked list is what turns this
+    # mechanism into a prioritised list of security controls to remove, so the
+    # separation is enforced here rather than left to whoever reads the output.
+    (([.records[] | select(.surfaced and .security)]) as $g
+     | if ($g | length) == 0 then empty
+       else ("", "security guards - never batched, each is its own decision:",
+             ($g[] | "  \(.sig)  tasks=\(.tasks | length) observed-false-positives=\(.count)  outcomes: \(.outcomes | join(", "))",
+                     "    last: \(.observations | last | .text)"),
+             "  frequency is not evidence a guard is wrong")
        end),
     (([.records[] | select(.sig == $u)]) as $u2
      | if ($u2 | length) == 0 then empty

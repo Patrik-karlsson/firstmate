@@ -246,7 +246,7 @@ Report only true captain-relevant outcomes or a declared external wait by append
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
 Append \`$FRICTION_VERB: [sig=<stable-slug>] {what impeded the work}\` when something impeded your domain without blocking it - an issue whose stated scope is badly understated, a helper that refuses, documented advice that contradicts a hook.
-It declares no state, parks nothing, and needs no answer, so append it and carry on; it is not subject to the report-sparingly rule above because it is not progress.
+It declares no state, parks nothing, needs no answer, and does not wake firstmate on its own, so append it and carry on; the report-sparingly rule above does not apply to it.
 Make \`sig\` name the thing that would REPEAT (\`issue-scope-understated\`, \`agents-md-conflict\`), never the instance, and name the rule, helper, or path CLASS rather than pasting the command line, the matched text, or file contents.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
@@ -340,8 +340,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    Append \`$FRICTION_VERB: [sig=<stable-slug>] {what impeded the work}\` when something impeded
    the work but did NOT block you - an issue whose stated scope is badly understated, a helper
    that refuses, documented advice that contradicts a hook. It declares no state: you keep
-   going, it parks nothing, and nobody has to answer it, so append it when you hit the thing
-   rather than saving it for the report. Make \`sig\` name the thing that would REPEAT
+   going, it parks nothing, nobody has to answer it, and it does not wake firstmate on its
+   own, so append it when you hit the thing rather than saving it for the report. Make \`sig\` name the thing that would REPEAT
    (\`issue-scope-understated\`, \`agents-md-conflict\`), never the instance, and name the rule,
    helper, or path CLASS - never the command line, the matched text, or file contents.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
@@ -463,8 +463,8 @@ $RULE1
    Append \`$FRICTION_VERB: [sig=<stable-slug>] {what impeded the work}\` when something impeded
    the work but did NOT block you - an issue whose stated scope is badly understated, a helper
    that refuses, documented advice that contradicts a hook. It declares no state: you keep
-   going, it parks nothing, and nobody has to answer it, so append it when you hit the thing
-   rather than saving it for the end. Make \`sig\` name the thing that would REPEAT
+   going, it parks nothing, nobody has to answer it, and it does not wake firstmate on its
+   own, so append it when you hit the thing rather than saving it for the end. Make \`sig\` name the thing that would REPEAT
    (\`issue-scope-understated\`, \`agents-md-conflict\`), never the instance, and name the rule,
    helper, or path CLASS - never the command line, the matched text, or file contents.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.

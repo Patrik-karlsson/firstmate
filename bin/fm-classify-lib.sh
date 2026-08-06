@@ -102,12 +102,25 @@ FM_CLASSIFY_FRICTION_VERB_DEFAULT='friction'
 # away-mode daemon, the stale path, and the fleet scan at once.
 # Raw status tails (the session-start digest, a captain reading the log) are
 # unaffected: they read the file directly and still show every friction event.
+# Both supervisors call this per status file per poll, and a status log only
+# grows, so the per-line work is deliberately two glob screens: a line is
+# skipped as blank only if it holds no non-space character, and it reaches the
+# real friction predicate only if it could plausibly start with that verb.
+# An ordinary `working:`/`done:` line matches neither and costs one case.
 last_status_line() {
-  local f=$1 line last=''
+  local f=$1 line last='' friction
   { [ -f "$f" ] && [ -r "$f" ]; } || return 0
+  friction=${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    [ -n "${line//[[:space:]]/}" ] || continue
-    status_is_friction "$line" && continue
+    case "$line" in
+      *[![:space:]]*) ;;
+      *) continue ;;
+    esac
+    case "$line" in
+      "$friction"*|[[:space:]]*)
+        status_is_friction "$line" && continue
+        ;;
+    esac
     last=$line
   done < "$f"
   printf '%s' "$last"
@@ -706,7 +719,12 @@ status_friction_events() {  # <status-file>
   { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ]; } || return 0
   friction=${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    [ -n "${line//[[:space:]]/}" ] || continue
+    # Same cheap prefix screen as last_status_line: only a line that could
+    # plausibly carry the verb pays for parsing it.
+    case "$line" in
+      "$friction"*|[[:space:]]*) ;;
+      *) continue ;;
+    esac
     verb=$(status_line_verb "$line")
     [ "$verb" = "$friction" ] || continue
     n=$((n + 1))
@@ -719,6 +737,45 @@ status_friction_events() {  # <status-file>
     printf '%s\t%s\t%s\n' "$n" "$sig" "$(_fm_friction_flatten "$text")"
   done < "$f"
   return 0
+}
+
+# 0 when every non-blank line appended to <status-file> beyond <previous-size>
+# bytes is a friction line, and at least one such line exists.
+#
+# A friction append grows the status file, and the watcher's change detector is
+# a size:mtime signature, so without this the append wakes firstmate exactly
+# like a real status change - and a mechanism built to remove noise becomes
+# noise. This is the precise test that lets a supervisor absorb it.
+#
+# Deliberately fail-closed in every uncertain case, because absorbing a real
+# status is far worse than one extra wake. It reads ONLY the appended bytes and
+# returns 1 - surface it - when the file shrank, is unreadable, has no recorded
+# previous size (a first sighting), grew by nothing, or grew by anything that is
+# not a friction line. A torn write whose delta begins mid-line also fails to
+# match, and the completed line changes the size again on the next poll.
+status_delta_is_friction_only() {  # <status-file> <previous-size>
+  local f=$1 prev=$2 size line friction saw=1
+  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ]; } || return 1
+  case "$prev" in ''|*[!0-9]*) return 1 ;; esac
+  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$prev" -lt "$size" ] || return 1
+  friction=${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *[![:space:]]*) ;;
+      *) continue ;;
+    esac
+    case "$line" in
+      "$friction"*|[[:space:]]*)
+        status_is_friction "$line" || return 1
+        saw=0
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(tail -c "+$((prev + 1))" "$f" 2>/dev/null)
+  return "$saw"
 }
 
 # Fleet-wide wrapper: every friction event under <state>, prefixed with its

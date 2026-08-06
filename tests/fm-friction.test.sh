@@ -232,13 +232,23 @@ test_guard_signature_surfaces_individually_with_its_caveat() {
   home=$(seed_guard_home guard-individual)
   json=$(fr "$home" list --json)
 
-  # Its own record and its own row, never folded into a pattern list with the
-  # ordinary signature beside it.
+  # Its own record and its own SECTION, never ranked in the pattern list beside
+  # the ordinary signature: batching is what turns a friction ranker into a
+  # prioritised list of security controls to remove.
   printf '%s' "$json" | jq -e '
     ([.records[] | select(.surfaced)] | length) == 2
     and ([.records[] | select(.security == true) | .sig] == ["secret-blocker-false-positive"])
   ' >/dev/null || fail "the guard signature must surface as its own security-marked record: $json"
-  assert_contains "$(fr "$home" list)" "[security]" "the rendering must mark the guard signature"
+  local text; text=$(fr "$home" list)
+  assert_contains "$text" "security guards - never batched" \
+    "the rendering must give guard signatures their own section"
+  assert_contains "$text" "frequency is not evidence a guard is wrong" \
+    "the guard section must carry the frequency caveat"
+  # The ordinary signature stays in the batched pattern list; the guard does not.
+  printf '%s' "$text" | awk '/^surfaced:/{s=1;next} /^$/{s=0} s' | grep -qF "issue-scope-understated" \
+    || fail "the ordinary signature must appear in the batched surfaced list"
+  printf '%s' "$text" | awk '/^surfaced:/{s=1;next} /^$/{s=0} s' | grep -qF "secret-blocker-false-positive" \
+    && fail "the guard signature must not be batched into the surfaced pattern list"
 
   draft=$(fr "$home" draft secret-blocker-false-positive --outcome keep)
   printf '%s' "$draft" | jq -e '.labels == ["known-friction"] and .close_on_file == true' >/dev/null \

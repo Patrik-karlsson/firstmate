@@ -83,7 +83,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin fleet navigation registry recording each project's standing delivery posture; firstmate-private, parsed for mechanical sync and seeding by fm-project-mode.sh (section 6)
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
-  friction/<sig>.json  durable per-signature record of non-blocking friction a worker reported and worked through; surviving teardown is the point, since a signature only becomes actionable once a second task hits it; `bin/fm-friction.sh` owns the record, threshold, counts, and triage
+  friction/<sig>.json  durable per-signature record of non-blocking friction a worker reported, surviving teardown; `bin/fm-friction.sh` owns the record, threshold, counts, and triage
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
@@ -495,7 +495,7 @@ If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if t
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
 
 Load `secondmate-provisioning` before creating or using a charter brief and preserve its idle-by-default and marked-return-channel contracts.
-Status appends are sparse supervisor-actionable events, not routine progress, apart from the non-blocking `friction:` verb, which records resistance a worker worked through and changes no task state; `bin/fm-classify-lib.sh` owns keyed open, resolved, and friction semantics.
+Status appends are sparse supervisor-actionable events, not routine progress, apart from the non-blocking `friction:` verb, which records resistance a worker worked through, changes no task state, and does not wake supervision on its own; `bin/fm-classify-lib.sh` owns keyed open, resolved, and friction semantics.
 The scaffold is a safety contract, not a suggestion.
 
 ## 12. Self-update

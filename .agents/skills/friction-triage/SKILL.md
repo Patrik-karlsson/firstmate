@@ -23,7 +23,8 @@ A signature seen in one task is usually one worker looping, so it is recorded an
 A signature seen in two tasks is a system problem, so it surfaces for the captain's decision.
 
 It is not a bug tracker, not a progress report, and not an escalation channel.
-A friction line never parks a worker, never gates cleanup, and never needs an answer from anyone.
+A friction line never parks a worker, never gates cleanup, never needs an answer from anyone, and never wakes supervision on its own.
+That last property is load-bearing: a mechanism for removing noise that cost a turn every time a worker used it would be worse than not having it, so workers are told to append friction freely and supervision absorbs it.
 Nothing here files an issue: triage is the captain's, and both `clear` and `keep` produce a **drafted** issue presented for approval.
 
 ## Surfacing
