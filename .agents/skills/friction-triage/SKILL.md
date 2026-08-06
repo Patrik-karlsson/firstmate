@@ -19,8 +19,7 @@ Read `bin/fm-friction.sh --help` for the record shape, states, count definitions
 ## What this mechanism is for, and what it is not
 
 It answers one question: which impediment recurred across independent work.
-A signature seen in one task is usually one worker looping, so it is recorded and never surfaced.
-A signature seen in two tasks is a system problem, so it surfaces for the captain's decision.
+The threshold is on distinct tasks rather than occurrences, and `bin/fm-friction.sh` owns it - so a signature below it is recorded and simply never reaches you.
 
 It is not a bug tracker, not a progress report, and not an escalation channel.
 A friction line never parks a worker, never gates cleanup, never needs an answer from anyone, and never wakes supervision on its own.
@@ -57,14 +56,10 @@ That matters concretely on a repository already carrying a large open-issue coun
 A signature naming a containment guard is handled differently, and this is not optional.
 `bin/fm-friction.sh` enforces it, so the commands will refuse rather than let a mistake through - do not work around a refusal.
 
-- It surfaces **on its own**, never batched into a pattern list.
-- Its only outcomes are **keep** or **narrow**. `clear` and `dismiss` are unavailable.
-  A `narrow` draft may propose tightening a false positive and must never propose removing or disabling the guard.
-- Its draft carries the observed false-positive count and an explicit note that frequency is not evidence a guard is wrong.
+Such a signature surfaces in its own section, and its only outcomes are **keep** or **narrow**; `clear` and `dismiss` do not exist for it.
+A `narrow` draft may propose tightening a false positive and must never propose removing or disabling the guard.
 
-The reason is structural. This mechanism ranks by how often something impedes work.
-That is the correct signal for a broken helper and the *wrong* signal for a guard: a guard that never fires falsely is a guard catching very little.
-Without the carve-out, the mechanism's natural output is a prioritised list of security controls to remove.
+Understand why before you try to route around a refusal: this mechanism ranks by how often something impedes work, which is the right signal for a broken helper and the wrong one for a guard, because a guard that never fires falsely is catching very little.
 
 If a guard signature is not classified as security and should be, extend the guard token list rather than triaging it as ordinary friction.
 Over-classifying costs one triage option; under-classifying recommends deleting a security control.
@@ -81,8 +76,7 @@ Over-classifying costs one triage option; under-classifying recommends deleting 
    Rejecting a draft rejects the wording, not the finding, so the signature stays eligible to surface again.
    `dismiss` is the separate, explicit act and is never the fallback for a rejected draft.
 
-A `kept` or `dismissed` signature keeps counting and never re-surfaces.
-The count stays honest, so friction that was accepted once and later became severe is still visible on inspection.
+Settling a signature is not deleting it: it keeps counting silently, so friction accepted once and later severe is still visible on inspection.
 
 ## Payload safety
 
