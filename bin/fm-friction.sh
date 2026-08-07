@@ -38,16 +38,28 @@
 #   fold exists to preserve. Once the log is gone the record is the only source,
 #   and the FM_FRICTION_OBSERVATIONS most recent of those are kept.
 #   count, tasks[] and first_seen/last_seen stay EXACT and never shrink, because
-#   they are what the threshold, the counts and the ranking read. dropped_counts
-#   carries the per-task eviction tally, and count is that tally plus what the
-#   current fold can see - exact whether a log is folded again unchanged (the
-#   same events, adding nothing) or recreated after its observations were
-#   evicted (new events, added on top).
+#   they are what the threshold, the counts and the ranking read. count and
+#   tasks are READ BACK from the record rather than rederived from the surviving
+#   window, so neither can fall below what the record already established as
+#   observations are evicted - in particular the distinct-task count the
+#   threshold reads cannot drop back under the surfacing bar. dropped_counts
+#   carries the per-task eviction tally and supplies the same base; the larger of
+#   the two wins, which restores the base if the tally is ever lost. It is a
+#   BASE and never a ceiling: what the current fold can see is added on top, so a
+#   log recreated after its observations were evicted still counts its new
+#   events, and re-folding an unchanged log adds nothing.
 #   observations_dropped states how many occurrences the window does not show,
-#   so a reader is never left to assume the array is the whole history.
-# Ordering inside the window is the fold's sort order (at, task, ordinal); every
-# live event in one fold shares that fold's timestamp, so "most recent" is exact
-# across folds and by task order within one.
+#   and both human-facing surfaces repeat it - `list` and every composed draft
+#   say "showing N of M" - so a shortened list is never mistaken for the whole
+#   history.
+# Retention inside the window is ROUND-ROBIN across tasks, newest first within
+# each task. A flat most-recent-N would concentrate the loss: every live event
+# folded in one pass carries that pass's single timestamp, so the sort ties and
+# the tie-break degrades to alphabetical-by-task, evicting whole tasks. A
+# signature surfaces because independent tasks hit it, so the record has to keep
+# evidence from each task it is claimed to span.
+# security is recomputed on every read and never taken from the record, so a
+# stored classification can never outlive a change to the guard token list.
 # The unclassified aggregate is windowed too. Its texts are the only value it
 # carries, but exempting it would restore unbounded growth for exactly the
 # repeated-typo case; counts.unclassified stays exact and the drop is disclosed.
@@ -321,6 +333,19 @@ merged_model() {  # <now>
     def guardmatch($sig; $tokens):
       ("-" + ($sig | slugfold) + "-") as $h
       | any($tokens[]; ("-" + slugfold + "-") as $t | ($h | contains($t)));
+    # A stored record can be valid JSON and still be the wrong SHAPE - an agent
+    # redacting a payload out of an observation writes exactly that. Every
+    # task-keyed group_by and index below hard-errors on a null key, which would
+    # take the whole store down rather than the one bad row, and ingest is the
+    # only writer so there would be no way back. Coerce each field once, here,
+    # instead of guarding each use.
+    def normobs: if type == "array"
+                 then map(select(type == "object" and (.task | type) == "string"))
+                 else [] end;
+    def normstrings: if type == "array" then map(select(type == "string")) else [] end;
+    def normcounts: if type == "object"
+                    then with_entries(select(.value | type == "number")) else {} end;
+    def normnum: if type == "number" and . >= 0 then . else 0 end;
 
     (input) as $live
     | (input) as $stored
@@ -329,8 +354,16 @@ merged_model() {  # <now>
     | ($stored | map({key: .sig, value: .}) | from_entries) as $stored_by_sig
     | (($stored | map(.sig)) + ($live | map(.sig)) | unique) as $sigs
     | [ $sigs[] as $s
-        | ($stored_by_sig[$s] // null) as $rec
-        | ((($rec.observations // []) + ($live_by_sig[$s] // []))
+        | ($stored_by_sig[$s] // {}) as $raw
+        | { observations: ($raw.observations | normobs),
+            dropped_counts: ($raw.dropped_counts | normcounts),
+            tasks: ($raw.tasks | normstrings),
+            projects: ($raw.projects | normstrings),
+            count: ($raw.count | normnum),
+            first_seen: $raw.first_seen, last_seen: $raw.last_seen,
+            state: $raw.state, outcome: $raw.outcome,
+            issue_url: $raw.issue_url, draft: $raw.draft } as $rec
+        | (($rec.observations + ($live_by_sig[$s] // []))
            | group_by(obskey) | map(sort_by(.at) | .[0])
            | sort_by([.at, .task, .ordinal])) as $obs
         # An observation belonging to a task whose status log still exists is
@@ -350,25 +383,44 @@ merged_model() {  # <now>
         | ($live_tasks | map({key: ., value: true}) | from_entries) as $is_live
         | ($obs | map(select($is_live[.task] // false))) as $live_obs
         | ($obs | map(select(($is_live[.task] // false) | not))) as $dead_obs
-        | (if ($dead_obs | length) > $window
-           then ($dead_obs | .[:(length - $window)]) else [] end) as $evicted
-        | ($rec.dropped_counts // {}) as $prev_dropped
+        # Retain ROUND-ROBIN across tasks, newest first within each task. Taking
+        # the window off the tail of one flat sort concentrates the loss: every
+        # live event folded in one pass carries that pass single timestamp, so
+        # `.at` ties and the tie-break degrades to alphabetical-by-task, evicting
+        # whole tasks. A signature surfaces because INDEPENDENT tasks hit it, so
+        # a record that keeps no evidence from one of them cannot support the
+        # claim its own draft makes.
+        | ($dead_obs | group_by(.task) | map(sort_by([.at, .ordinal]) | reverse)) as $dead_by_task
+        | ([ range(0; ($dead_by_task | map(length) | max // 0)) as $i
+             | $dead_by_task[] | .[$i] // empty ] | .[:$window]) as $dead_kept
+        | ($dead_kept | map({key: obskey, value: true}) | from_entries) as $keep_set
+        | ($dead_obs | map(select(($keep_set[obskey] // false) | not))) as $evicted
+        | $rec.dropped_counts as $prev_dropped
         | ($evicted | group_by(.task) | map({key: .[0].task, value: length}) | from_entries) as $evicted_tc
         | ((($prev_dropped | keys) + ($evicted_tc | keys) | unique) as $ks
            | [ $ks[] | {key: ., value: (($prev_dropped[.] // 0) + ($evicted_tc[.] // 0))} ]
            | from_entries) as $dropped_counts
         | ($obs | group_by(.task) | map({key: .[0].task, value: length}) | from_entries) as $obs_tc
-        | ((($prev_dropped | keys) + ($obs_tc | keys) | unique) as $ks2
-           | [ $ks2[] | {key: ., value: (($prev_dropped[.] // 0) + ($obs_tc[.] // 0))} ]
-           | from_entries) as $tc
-        | ([$tc[]] | add // 0) as $count
-        | ($tc | keys) as $tasks
-        | ((($rec.projects // []) + ($obs | map(.project)))
+        # The dropped base is read back from the record as well as summed from
+        # the per-task tally, and the LARGER wins. In a healthy record the two
+        # are equal by construction - the stored count is the tally plus the
+        # stored window - so the max only bites when the tally was lost, where it
+        # restores the base instead of letting the total collapse to the window.
+        # It is a base, never a ceiling: the events this fold can see are added
+        # ON TOP, so a log recreated after its observations were evicted still
+        # counts its new events.
+        | ([ ([$prev_dropped[]] | add // 0),
+             (($rec.count - ($rec.observations | length))) ] | max | normnum) as $dropped_base
+        | ($dropped_base + ($obs | length)) as $count
+        # tasks is read back from the record too, so the distinct-task count the
+        # threshold reads can never fall below what the record already claimed
+        # as observations are evicted.
+        | ((($prev_dropped | keys) + ($obs_tc | keys) + $rec.tasks) | unique) as $tasks
+        | (($rec.projects + ($obs | map(.project)))
            | map(select(. != null and . != "")) | unique) as $projects
         | ([$rec.first_seen // empty] + ($obs | map(.at)) | min) as $first_seen
         | ([$rec.last_seen // empty] + ($obs | map(.at)) | max) as $last_seen
-        | (($live_obs + ($dead_obs | .[-$window:]))
-           | sort_by([.at, .task, .ordinal])) as $kept
+        | (($live_obs + $dead_kept) | sort_by([.at, .task, .ordinal])) as $kept
         | (if $s == $unclassified then "unclassified" else ($rec.state // "new") end) as $state
         | guardmatch($s; $gt) as $security
         | {
@@ -380,7 +432,7 @@ merged_model() {  # <now>
             dropped_counts: $dropped_counts,
             projects: $projects,
             observations: $kept,
-            observations_dropped: ($count - ($kept | length)),
+            observations_dropped: ([$count - ($kept | length), 0] | max),
             state: $state,
             security: $security,
             outcome: ($rec.outcome // null),
@@ -534,7 +586,18 @@ render_text() {  # <model-json>
     (([.records[] | select(.sig == $u)]) as $u2
      | if ($u2 | length) == 0 then empty
        else ("", "unclassified: \($u2[0].count) event(s) the fold could not attribute to a signature",
-             ($u2[0].observations[] | "  \(.task): \(.text)"))
+             ($u2[0].observations[] | "  \(.task): \(.text)"),
+             (if ($u2[0].observations_dropped // 0) > 0
+              then "  showing \($u2[0].observations | length) of \($u2[0].count) (raise FM_FRICTION_OBSERVATIONS)"
+              else empty end))
+       end),
+    # The window elides observations, never counts. Saying so here keeps the
+    # text surface as honest as the record: a reader must not take a shortened
+    # list for the whole history.
+    (([.records[] | select(.surfaced and (.observations_dropped // 0) > 0)]) as $t
+     | if ($t | length) == 0 then empty
+       else ("", "observations elided by the retained window (counts and task lists stay exact):",
+             ($t[] | "  \(.sig): showing \(.observations | length) of \(.count)"))
        end),
     (if .records_truncated > 0 then "", "records: showing \(.records | length) of \(.records_total) (raise FM_FRICTION_RECORDS)" else empty end)'
 }
@@ -581,6 +644,10 @@ compose_draft() {  # <record-json> <outcome> <now>
          "## What each worker observed",
          "" ]
        + [ $r.observations[] | "- `\(.task)`\(if .project != "" then " (\(.project))" else "" end): \(.text)" ]
+       + (if ($r.observations_dropped // 0) > 0 then
+            [ "",
+              "Showing \($r.observations | length) of \($r.count) observation(s); the rest were elided by the retained window. The occurrence count and the task list above are exact." ]
+          else [] end)
        + (if $r.security then
             [ "",
               "## Security guard",
@@ -639,7 +706,12 @@ case "$cmd" in
 
   outcomes)
     require_sig "${1:-}"
-    read_record "$1" | jq -r '.outcomes[]'
+    # Captured, not piped: read_record dies on a failed read, and on the left of
+    # a pipeline that die exits only the subshell, leaving the command reporting
+    # success with empty output. This is the interlock triage checks before
+    # drafting, so an empty answer must never be mistaken for a real one.
+    REC=$(read_record "$1") || die "could not read friction records"
+    printf '%s' "$REC" | jq -r '.outcomes[]'
     ;;
 
   draft)

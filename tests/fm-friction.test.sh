@@ -546,6 +546,27 @@ test_friction_only_delta_fails_closed() {
   pass "the friction-only delta test fails closed on every uncertain case"
 }
 
+test_last_status_line_is_exact_past_the_bounded_scan() {
+  local dir log i
+  dir=$(mktemp -d "$TMP_ROOT/bounded-scan.XXXXXX")
+  log="$dir/task.status"
+  # The only state-bearing line is the FIRST, buried under a friction tail far
+  # longer than the bounded scan. Both phases must miss it and the full-file
+  # fallback must still return it, or a long-running task reads as stateless.
+  printf 'working: the only real state\n' > "$log"
+  for i in $(seq 1 400); do
+    printf 'friction: [sig=chatty] observation %d\n' "$i" >> "$log"
+  done
+  [ "$(FM_CLASSIFY_STATUS_TAIL=50 last_status_line "$log")" = "working: the only real state" ] \
+    || fail "a state line before a long friction tail must survive the bounded scan"
+
+  # And the ordinary case: a state line inside the tail wins over an earlier one.
+  printf 'done: shipped\n' >> "$log"
+  [ "$(FM_CLASSIFY_STATUS_TAIL=50 last_status_line "$log")" = "done: shipped" ] \
+    || fail "the last state-bearing line must win"
+  pass "last_status_line stays exact when the bounded scan cannot answer"
+}
+
 test_malformed_friction_line_is_still_inert() {
   local dir log
   dir=$(mktemp -d "$TMP_ROOT/malformed.XXXXXX")
@@ -704,6 +725,117 @@ test_settled_signature_cannot_be_redrafted() {
   pass "a settled signature cannot be revived by drafting and then cancelling"
 }
 
+test_shape_invalid_record_costs_only_its_own_row() {
+  local home json
+  home=$(make_home shape-invalid)
+  mkdir -p "$home/data/friction"
+  jq -n '{sig:"good-sig",first_seen:"2026-01-01T00:00:00Z",last_seen:"2026-01-01T00:00:00Z",
+          count:2,tasks:["task-a","task-b"],dropped_counts:{"task-a":1,"task-b":1},
+          projects:["lobbyn"],observations:[],state:"surfaced",security:false,
+          outcome:null,issue_url:null,draft:null}' > "$home/data/friction/good-sig.json"
+  # Valid JSON, wrong shape: an observation with no task. friction-triage tells
+  # an agent to hand-correct a record that captured a payload, which is exactly
+  # how one gets written - and every task-keyed group in the fold errors on a
+  # null key, so this must cost its own row like an unparseable file does.
+  # dropped_counts is the wrong type too, so the per-task tally coerces away and
+  # the record's own count is the ONLY surviving source of the dropped base.
+  jq -n '{sig:"weird-sig",first_seen:"2026-01-01T00:00:00Z",last_seen:"2026-01-01T00:00:00Z",
+          count:7,tasks:["task-a"],dropped_counts:"corrupt",projects:[],
+          observations:[{text:"redacted",ordinal:1,at:"2026-01-01T00:00:00Z"}],
+          state:"new",security:false,outcome:null,issue_url:null,draft:null}' \
+    > "$home/data/friction/weird-sig.json"
+
+  json=$(fr "$home" list --json) || fail "a shape-invalid record must not break the read"
+  printf '%s' "$json" | jq -e '
+    ([.records[].sig] | index("good-sig")) != null
+    and ([.records[] | select(.sig == "good-sig") | .count] == [2])
+  ' >/dev/null || fail "the neighbouring record must stay readable: $json"
+
+  # The bad record must degrade, not evaporate: with its tally unusable the
+  # count and task list are read back from the record rather than collapsing to
+  # what the surviving observations can prove.
+  printf '%s' "$json" | jq -e '
+    [.records[] | select(.sig == "weird-sig")] as $w
+    | ($w | length) == 1 and $w[0].count == 7 and $w[0].tasks == ["task-a"]
+  ' >/dev/null || fail "a shape-invalid record must keep its count and tasks: $json"
+
+  fr "$home" ingest || fail "ingest, the only writer, must survive a shape-invalid record"
+  # Re-read after the rewrite: the record now holds no observations at all, so a
+  # second fold has nothing but the read-back to work from.
+  fr "$home" show weird-sig | jq -e '.count == 7 and .tasks == ["task-a"]' >/dev/null \
+    || fail "the count must survive a rewrite that leaves no observations: $(fr "$home" show weird-sig)"
+  pass "a shape-invalid record costs its own row and never bricks the store"
+}
+
+test_outcomes_propagates_a_read_failure() {
+  local home rc out
+  home=$(make_home outcomes-rc)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=agents-md-conflict] advice contradicts a hook"
+  status_append "$home" task-b "friction: [sig=agents-md-conflict] and again here"
+
+  # outcomes is the interlock triage checks before drafting, so an empty answer
+  # must never be indistinguishable from a real one.
+  out=$(fr "$home" outcomes agents-md-conflict) || fail "outcomes must succeed for a real signature"
+  assert_contains "$out" "clear" "a real signature must report its outcomes"
+  set +e
+  fr "$home" outcomes no-such-sig >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "outcomes must propagate a read failure the way show does"
+  pass "outcomes reports a read failure instead of succeeding with empty output"
+}
+
+test_eviction_keeps_evidence_from_every_task() {
+  local home json text draft
+  home=$(make_home eviction-spread)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  local i
+  for i in $(seq 1 12); do
+    status_append "$home" task-a "friction: [sig=loud] task-a occurrence $i"
+    status_append "$home" task-b "friction: [sig=loud] task-b occurrence $i"
+  done
+  FM_FRICTION_OBSERVATIONS=4 fr "$home" ingest
+  rm -f "$home"/state/task-a.status "$home"/state/task-b.status
+  FM_FRICTION_OBSERVATIONS=4 fr "$home" ingest
+
+  # A signature surfaces because INDEPENDENT tasks hit it. A window that evicts
+  # whole tasks leaves the record unable to support the claim its draft makes.
+  json=$(FM_FRICTION_OBSERVATIONS=4 fr "$home" show loud)
+  printf '%s' "$json" | jq -e '
+    .count == 24 and (.tasks | sort) == ["task-a", "task-b"]
+    and ([.observations[].task] | unique | sort) == ["task-a", "task-b"]
+  ' >/dev/null || fail "the window must keep evidence from every task: $json"
+
+  # And both human-facing surfaces must say the list is short.
+  draft=$(FM_FRICTION_OBSERVATIONS=4 fr "$home" draft loud --outcome clear | jq -r '.body')
+  assert_contains "$draft" "of 24 observation(s)" "a draft must disclose elided observations"
+  text=$(FM_FRICTION_OBSERVATIONS=4 fr "$home" list)
+  assert_contains "$text" "observations elided by the retained window" \
+    "the text rendering must disclose elided observations"
+  pass "eviction spreads across tasks and both surfaces disclose the elision"
+}
+
+test_unclassified_section_discloses_its_window() {
+  local home text
+  home=$(make_home unclassified-window)
+  task_project "$home" task-a lobbyn
+  local i
+  for i in $(seq 1 12); do
+    status_append "$home" task-a "friction: no signature token $i"
+  done
+  FM_FRICTION_OBSERVATIONS=3 fr "$home" ingest
+  rm -f "$home"/state/task-a.status
+  FM_FRICTION_OBSERVATIONS=3 fr "$home" ingest
+
+  text=$(FM_FRICTION_OBSERVATIONS=3 fr "$home" list)
+  assert_contains "$text" "unclassified: 12 event(s)" "the unclassified count must stay exact"
+  assert_contains "$text" "showing 3 of 12" "the unclassified section must disclose its window"
+  pass "the unclassified section discloses how much of its history it shows"
+}
+
 # --- 7. durability across teardown ------------------------------------------
 
 test_friction_survives_teardown() {
@@ -809,7 +941,12 @@ test_triage_preserves_the_exact_count
 test_ingest_is_idempotent
 test_friction_is_transparent_to_state_readers
 test_friction_only_delta_fails_closed
+test_last_status_line_is_exact_past_the_bounded_scan
 test_malformed_friction_line_is_still_inert
+test_shape_invalid_record_costs_only_its_own_row
+test_outcomes_propagates_a_read_failure
+test_eviction_keeps_evidence_from_every_task
+test_unclassified_section_discloses_its_window
 test_friction_survives_teardown
 test_ingest_leaves_a_frictionless_home_untouched
 

@@ -529,6 +529,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_friction == 0 and ($friction_all | length) > $friction_n then {surface:("friction showing \($friction_n) of \($friction_all | length)"), reveal:"--all-friction"} else empty end),
         (if $all_friction == 0 and ($friction_guards_all | length) > $friction_n then {surface:("friction_guards showing \($friction_n) of \($friction_guards_all | length)"), reveal:"--all-friction"} else empty end),
         (($friction.records_truncated // 0) as $n | if $n > 0 then {surface:("friction records omitted by the record bound: \($n)"), reveal:"raise FM_FRICTION_RECORDS"} else empty end),
+        (([($friction.records // [])[] | select(.surfaced == true or .state == "unclassified") | select((.observations_dropped // 0) > 0)] | length) as $n
+         | if $n > 0 then {surface:("friction observations elided by the retained window for \($n) signature(s); counts and task lists stay exact"), reveal:"bin/fm-friction.sh show <sig>"} else empty end),
         (if $friction.available == false then {surface:("friction records unavailable: " + ($friction.reason // "read failed")), reveal:"run bin/fm-friction.sh list"} else empty end),
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }

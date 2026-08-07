@@ -103,27 +103,66 @@ FM_CLASSIFY_FRICTION_VERB_DEFAULT='friction'
 # Raw status tails (the session-start digest, a captain reading the log) are
 # unaffected: they read the file directly and still show every friction event.
 # Both supervisors call this per status file per poll, and a status log only
-# grows, so the per-line work is deliberately two glob screens: a line is
-# skipped as blank only if it holds no non-space character, and it reaches the
-# real friction predicate only if it could plausibly start with that verb.
-# An ordinary `working:`/`done:` line matches neither and costs one case.
-last_status_line() {
-  local f=$1 line last='' friction
-  { [ -f "$f" ] && [ -r "$f" ]; } || return 0
+# grows. Per line the work is two glob screens - a line is skipped as blank only
+# if it holds no non-space character, and it reaches the real friction predicate
+# only if it could plausibly start with that verb - but the SCAN is bounded, in
+# two phases, because per-line bash over a long log is far more expensive than
+# the screens themselves:
+#   1. Read up to FM_CLASSIFY_STATUS_TAIL lines from the front. Reaching EOF
+#      inside that bound means the whole file was read, so the answer is exact
+#      and no process was forked - the overwhelmingly common case, since a
+#      status log is a sparse event stream.
+#   2. Only on overflow, re-read that many lines off the TAIL. Any later
+#      state-bearing line is necessarily in that tail, so the answer is still
+#      exact. A tail that is entirely friction or blank falls back to a full
+#      scan, which is the only path that pays for the whole file.
+FM_CLASSIFY_STATUS_TAIL_DEFAULT=500
+
+# Scan a status stream for the last state-bearing line into
+# _FM_LAST_STATUS_LINE. <limit> 0 reads to EOF; otherwise reading past <limit>
+# lines stops and sets _FM_LAST_STATUS_OVERFLOW, marking the answer incomplete.
+_fm_last_status_line_scan() {  # <limit>
+  local limit=$1 line friction n=0
+  _FM_LAST_STATUS_LINE=''
+  _FM_LAST_STATUS_OVERFLOW=0
   friction=${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$limit" -ne 0 ]; then
+      n=$((n + 1))
+      if [ "$n" -gt "$limit" ]; then
+        _FM_LAST_STATUS_OVERFLOW=1
+        return 0
+      fi
+    fi
     case "$line" in
       *[![:space:]]*) ;;
       *) continue ;;
     esac
     case "$line" in
       "$friction"*|[[:space:]]*)
-        status_is_friction "$line" && continue
+        # The shared verb setter directly rather than status_is_friction, which
+        # only wraps it: one bash function call per candidate line instead of
+        # two, on the loop both supervisors run per status file per poll. The
+        # rule still has exactly one owner - this does not re-parse the verb.
+        _fm_status_line_verb "$line"
+        [ "$_FM_STATUS_LINE_VERB" != "$friction" ] || continue
         ;;
     esac
-    last=$line
-  done < "$f"
-  printf '%s' "$last"
+    _FM_LAST_STATUS_LINE=$line
+  done
+}
+
+last_status_line() {
+  local f=$1 n
+  { [ -f "$f" ] && [ -r "$f" ]; } || return 0
+  n=${FM_CLASSIFY_STATUS_TAIL:-$FM_CLASSIFY_STATUS_TAIL_DEFAULT}
+  case "$n" in ''|*[!0-9]*|0) n=$FM_CLASSIFY_STATUS_TAIL_DEFAULT ;; esac
+  _fm_last_status_line_scan "$n" < "$f"
+  if [ "$_FM_LAST_STATUS_OVERFLOW" -eq 1 ]; then
+    _fm_last_status_line_scan "$n" < <(tail -n "$n" "$f" 2>/dev/null)
+    [ -n "$_FM_LAST_STATUS_LINE" ] || _fm_last_status_line_scan 0 < "$f"
+  fi
+  printf '%s' "$_FM_LAST_STATUS_LINE"
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
@@ -189,7 +228,9 @@ status_is_paused_or_captain_held() {  # <status-line>
 # 0 if a status line's leading verb is the non-blocking friction verb. A pure
 # read of the line itself, matching only the verb before the first colon so an
 # observation that mentions friction elsewhere does not false-match. This is the
-# predicate last_status_line uses to stay transparent to friction.
+# predicate the friction-only delta test reads a status append through;
+# last_status_line's scan resolves the same verb through _fm_status_line_verb
+# directly, to spend one bash function call per candidate line rather than two.
 status_is_friction() {  # <status-line>
   local line=$1
   [ -n "$line" ] || return 1
