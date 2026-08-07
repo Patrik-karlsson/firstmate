@@ -726,7 +726,6 @@ case "$cmd" in
       shift
     done
     [ -n "$OUTCOME" ] || die "draft requires --outcome"
-    ingest
     REC=$(read_record "$SIG")
     # A settled signature is not re-drafted. Without this gate `draft` creates
     # the pending draft that `cancel` accepts, and the pair walks a cleared,
@@ -740,8 +739,14 @@ case "$cmd" in
     printf '%s' "$REC" | jq -e --arg o "$OUTCOME" '.outcomes | index($o)' >/dev/null \
       || die "$OUTCOME is not an available outcome for $SIG (available: $(printf '%s' "$REC" | jq -r '.outcomes | join(", ")'))"
     DRAFT=$(compose_draft "$REC" "$OUTCOME" "$(now_ts)")
-    # shellcheck disable=SC2016 # $d is a jq variable bound by --argjson, not a shell one.
-    update_record "$SIG" '.draft = $d' --argjson d "$DRAFT"
+    # The draft embeds one bullet per retained observation, and observations for
+    # a task whose log is still live are deliberately never evicted, so this blob
+    # is unbounded while the reporting tasks run. --slurpfile past a process
+    # substitution keeps it off argv - only the /dev/fd path travels there - so
+    # the most-reported signature, the one the ranking exists to surface, cannot
+    # become the one signature that is impossible to triage.
+    # shellcheck disable=SC2016 # $d is a jq variable bound by --slurpfile, not a shell one.
+    update_record "$SIG" '.draft = $d[0]' --slurpfile d <(printf '%s' "$DRAFT")
     printf '%s\n' "$DRAFT"
     ;;
 
@@ -757,7 +762,6 @@ case "$cmd" in
       shift
     done
     [ -n "$ISSUE" ] || die "approve requires --issue <url> of the filed issue"
-    ingest
     REC=$(read_record "$SIG")
     OUTCOME=$(printf '%s' "$REC" | jq -r '.draft.outcome // ""')
     [ -n "$OUTCOME" ] || die "$SIG has no drafted issue to approve; run draft first"
@@ -775,7 +779,6 @@ case "$cmd" in
 
   cancel)
     SIG=${1:-}; require_sig "$SIG"
-    ingest
     REC=$(read_record "$SIG")
     # Cancel rejects the wording of a PENDING draft, so a pending draft is a
     # precondition rather than an assumption. Without it, cancelling a signature
@@ -794,7 +797,6 @@ case "$cmd" in
 
   dismiss)
     SIG=${1:-}; require_sig "$SIG"
-    ingest
     REC=$(read_record "$SIG")
     printf '%s' "$REC" | jq -e '.security | not' >/dev/null \
       || die "$SIG names a containment guard; silent dismissal is not an outcome (available: $(printf '%s' "$REC" | jq -r '.outcomes | join(", ")'))"

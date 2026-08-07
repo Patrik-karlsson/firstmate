@@ -105,35 +105,38 @@ FM_CLASSIFY_FRICTION_VERB_DEFAULT='friction'
 # Both supervisors call this per status file per poll, and a status log only
 # grows. Per line the work is two glob screens - a line is skipped as blank only
 # if it holds no non-space character, and it reaches the real friction predicate
-# only if it could plausibly start with that verb - but the SCAN is bounded, in
-# two phases, because per-line bash over a long log is far more expensive than
-# the screens themselves:
-#   1. Read up to FM_CLASSIFY_STATUS_TAIL lines from the front. Reaching EOF
-#      inside that bound means the whole file was read, so the answer is exact
-#      and no process was forked - the overwhelmingly common case, since a
-#      status log is a sparse event stream.
-#   2. Only on overflow, re-read that many lines off the TAIL. Any later
-#      state-bearing line is necessarily in that tail, so the answer is still
-#      exact. A tail that is entirely friction or blank falls back to a full
-#      scan, which is the only path that pays for the whole file.
-FM_CLASSIFY_STATUS_TAIL_DEFAULT=500
+# only if it could plausibly start with that verb - but per-line bash over a long
+# log costs far more than the screens, so the common case reads a bounded TAIL
+# rather than the file:
+#   1. Scan the last FM_CLASSIFY_STATUS_TAIL lines. A state-bearing line found
+#      there is necessarily the file's last one, because every later line is in
+#      the tail too. This is the shape a finished task leaves - the state line
+#      IS the last line - so the bound only has to absorb friction appended
+#      after it, and a small bound is what keeps the miss below cheap.
+#   2. A tail SHORTER than the bound was the whole file, so an empty answer is
+#      already exact and no second read happens.
+#   3. Only a full-length tail holding no state-bearing line falls back to
+#      scanning the file. That is the mid-run shape - one `working:` line then
+#      nothing but friction - where the answer is at the front and reading the
+#      file is unavoidable, so the fallback is kept to ONE extra pass over a
+#      bounded tail rather than a second bounded scan on top of it.
+# The bound is small on purpose. It only has to span the friction a worker
+# appends AFTER its last state line, which is a handful; every line beyond that
+# is pure overhead on the fallback, which is the mid-run shape and therefore the
+# common one. Raising it buys nothing and makes the miss path slower.
+FM_CLASSIFY_STATUS_TAIL_DEFAULT=20
 
-# Scan a status stream for the last state-bearing line into
-# _FM_LAST_STATUS_LINE. <limit> 0 reads to EOF; otherwise reading past <limit>
-# lines stops and sets _FM_LAST_STATUS_OVERFLOW, marking the answer incomplete.
-_fm_last_status_line_scan() {  # <limit>
-  local limit=$1 line friction n=0
+# Scan a status stream to EOF for the last state-bearing line, into
+# _FM_LAST_STATUS_LINE, reporting lines read in _FM_LAST_STATUS_LINES so a
+# caller can tell a truncated tail from a whole file.
+_fm_last_status_line_scan() {
+  local line friction n=0
   _FM_LAST_STATUS_LINE=''
-  _FM_LAST_STATUS_OVERFLOW=0
   friction=${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    if [ "$limit" -ne 0 ]; then
-      n=$((n + 1))
-      if [ "$n" -gt "$limit" ]; then
-        _FM_LAST_STATUS_OVERFLOW=1
-        return 0
-      fi
-    fi
+    # Counted before the screens: a tail of nothing but blank and friction lines
+    # still proves how much of the file was read.
+    n=$((n + 1))
     case "$line" in
       *[![:space:]]*) ;;
       *) continue ;;
@@ -150,6 +153,7 @@ _fm_last_status_line_scan() {  # <limit>
     esac
     _FM_LAST_STATUS_LINE=$line
   done
+  _FM_LAST_STATUS_LINES=$n
 }
 
 last_status_line() {
@@ -157,10 +161,9 @@ last_status_line() {
   { [ -f "$f" ] && [ -r "$f" ]; } || return 0
   n=${FM_CLASSIFY_STATUS_TAIL:-$FM_CLASSIFY_STATUS_TAIL_DEFAULT}
   case "$n" in ''|*[!0-9]*|0) n=$FM_CLASSIFY_STATUS_TAIL_DEFAULT ;; esac
-  _fm_last_status_line_scan "$n" < "$f"
-  if [ "$_FM_LAST_STATUS_OVERFLOW" -eq 1 ]; then
-    _fm_last_status_line_scan "$n" < <(tail -n "$n" "$f" 2>/dev/null)
-    [ -n "$_FM_LAST_STATUS_LINE" ] || _fm_last_status_line_scan 0 < "$f"
+  _fm_last_status_line_scan < <(tail -n "$n" "$f" 2>/dev/null)
+  if [ -z "$_FM_LAST_STATUS_LINE" ] && [ "$_FM_LAST_STATUS_LINES" -ge "$n" ]; then
+    _fm_last_status_line_scan < "$f"
   fi
   printf '%s' "$_FM_LAST_STATUS_LINE"
 }

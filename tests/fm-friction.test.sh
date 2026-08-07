@@ -564,6 +564,21 @@ test_last_status_line_is_exact_past_the_bounded_scan() {
   printf 'done: shipped\n' >> "$log"
   [ "$(FM_CLASSIFY_STATUS_TAIL=50 last_status_line "$log")" = "done: shipped" ] \
     || fail "the last state-bearing line must win"
+
+  # A log SHORTER than the bound with no state-bearing line at all was fully
+  # read by the bounded scan, so the empty answer is already exact and must not
+  # be second-guessed into another pass.
+  local short="$dir/short.status"
+  printf 'friction: [sig=only] just friction\nfriction: [sig=only] and more\n' > "$short"
+  [ -z "$(FM_CLASSIFY_STATUS_TAIL=50 last_status_line "$short")" ] \
+    || fail "a friction-only log must report no state-bearing line"
+
+  # Exactly the bound, with the state line outside it, still falls back.
+  local exact="$dir/exact.status"
+  printf 'working: buried at the front\n' > "$exact"
+  for i in $(seq 1 50); do printf 'friction: [sig=chatty] observation %d\n' "$i" >> "$exact"; done
+  [ "$(FM_CLASSIFY_STATUS_TAIL=50 last_status_line "$exact")" = "working: buried at the front" ] \
+    || fail "a full-length friction tail must fall back to the whole file"
   pass "last_status_line stays exact when the bounded scan cannot answer"
 }
 
@@ -836,6 +851,41 @@ test_unclassified_section_discloses_its_window() {
   pass "the unclassified section discloses how much of its history it shows"
 }
 
+test_draft_survives_a_very_chatty_signature() {
+  local home pad i json body
+  home=$(make_home chatty-draft)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  # Observations for a task whose log is still LIVE are never evicted - that is
+  # the authorized carve-out that keeps teardown's last fold honest - so a
+  # heavily reported signature carries an unbounded draft body. The status logs
+  # stay in place here for exactly that reason.
+  pad=$(printf 'y%.0s' $(seq 1 180))
+  for i in $(seq 1 350); do
+    status_append "$home" task-a "friction: [sig=chatty-helper] occurrence $i $pad"
+    status_append "$home" task-b "friction: [sig=chatty-helper] occurrence $i $pad"
+  done
+  fr "$home" ingest || fail "ingest must succeed for a chatty signature"
+  json=$(fr "$home" show chatty-helper)
+  printf '%s' "$json" | jq -e '.count == 700 and .observations_dropped == 0' >/dev/null \
+    || fail "the fixture must retain every observation to exercise the draft transport: $(printf '%s' "$json" | jq -c '{count,observations_dropped}')"
+
+  # The most-reported signature is the one the ranking exists to surface, so it
+  # must not be the one signature that cannot be triaged.
+  fr "$home" draft chatty-helper --outcome clear >/dev/null \
+    || fail "drafting the most-reported signature must not fail on transport"
+  # Round-trip, not just the exit code: a draft that silently stored null would
+  # look like success.
+  fr "$home" show chatty-helper | jq -e '
+    .draft != null and .draft.outcome == "clear" and (.draft.body | length) > 100000
+  ' >/dev/null || fail "the drafted issue must be stored intact: $(fr "$home" show chatty-helper | jq -c '.draft | {outcome, body_len:(.body|length)}')"
+  # And the body the captain reads must agree with the record it hangs off.
+  body=$(fr "$home" show chatty-helper | jq -r '.draft.body')
+  assert_contains "$body" "observed 700 time(s) across 2 task(s)" \
+    "the drafted body must agree with the record it is attached to"
+  pass "a very chatty signature can still be drafted and the draft round-trips"
+}
+
 # --- 7. durability across teardown ------------------------------------------
 
 test_friction_survives_teardown() {
@@ -947,6 +997,7 @@ test_shape_invalid_record_costs_only_its_own_row
 test_outcomes_propagates_a_read_failure
 test_eviction_keeps_evidence_from_every_task
 test_unclassified_section_discloses_its_window
+test_draft_survives_a_very_chatty_signature
 test_friction_survives_teardown
 test_ingest_leaves_a_frictionless_home_untouched
 
