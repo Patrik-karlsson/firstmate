@@ -559,6 +559,151 @@ test_malformed_friction_line_is_still_inert() {
   pass "a malformed friction line is unclassified, never a state change"
 }
 
+# --- 6b. an accumulating store stays readable -------------------------------
+
+test_large_store_stays_readable_and_never_renders_blind() {
+  local home json text pad i
+  home=$(make_home large-store)
+  mkdir -p "$home/data/friction"
+  # Seeded as record FILES rather than through ingest: data/friction/<sig>.json
+  # is this script's own persisted-state contract (the same one the corrupt-record
+  # case writes), and reaching the transport limit through status logs alone would
+  # take minutes. 300 records x ~450 bytes puts the durable read well past the
+  # ~128 KB a single argv string can carry.
+  pad=$(printf 'x%.0s' $(seq 1 200))
+  for i in $(seq 1 300); do
+    jq -n --arg s "bulk-sig-$i" --arg p "$pad" '{
+      sig: $s, first_seen: "2026-01-01T00:00:00Z", last_seen: "2026-01-02T00:00:00Z",
+      count: 4, tasks: ["task-a", "task-b"], dropped_counts: {"task-a": 2, "task-b": 1},
+      projects: ["lobbyn"],
+      observations: [ { task: "task-a", ordinal: 1, sig: $s, text: $p,
+                        project: "lobbyn", at: "2026-01-01T00:00:00Z" } ],
+      state: "surfaced", security: false, outcome: null, issue_url: null, draft: null
+    }' > "$home/data/friction/bulk-sig-$i.json"
+  done
+  [ "$(cat "$home/data/friction"/*.json | wc -c)" -gt 131072 ] \
+    || fail "the seeded store must exceed a single argv string to be a real test"
+
+  json=$(fr "$home" list --json) || fail "list --json must survive a large durable store"
+  printf '%s' "$json" | jq -e 'has("counts") and .records_total == 300' >/dev/null \
+    || fail "a large store must still produce a complete model: $(printf '%s' "$json" | head -c 200)"
+
+  # Exit status alone does not catch this: the failure mode was a successful
+  # exit with an empty rendering, which is the blind section the counts exist
+  # to prevent.
+  text=$(fr "$home" list) || fail "text rendering must survive a large durable store"
+  [ -n "$text" ] || fail "a large store must never render an empty friction section"
+  assert_contains "$text" "surfaced=300" "the counts must be stated over the whole store"
+  fr "$home" ingest || fail "ingest must survive a large durable store"
+  pass "an accumulated store stays readable and never renders a blind section"
+}
+
+test_observation_window_bounds_the_record_without_losing_counts() {
+  local home json total
+  home=$(make_home obs-window)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  local i
+  for i in $(seq 1 40); do
+    status_append "$home" task-a "friction: [sig=loud-sig] task-a occurrence $i"
+    status_append "$home" task-b "friction: [sig=loud-sig] task-b occurrence $i"
+  done
+
+  # While the logs exist every observation is re-derivable, so none is evicted:
+  # teardown folds one last time with the log still present, and evicting there
+  # would discard exactly what that fold exists to preserve.
+  FM_FRICTION_OBSERVATIONS=5 fr "$home" ingest || fail "ingest must succeed with a window"
+  json=$(FM_FRICTION_OBSERVATIONS=5 fr "$home" show loud-sig)
+  printf '%s' "$json" | jq -e '
+    .count == 80 and (.observations | length) == 80 and .observations_dropped == 0
+  ' >/dev/null || fail "a live task must keep its observations: $json"
+
+  # Once the logs are gone the record is the only source, so the window applies
+  # and the dropped occurrences must still be counted.
+  rm -f "$home"/state/task-a.status "$home"/state/task-b.status
+  FM_FRICTION_OBSERVATIONS=5 fr "$home" ingest || fail "ingest after teardown must succeed"
+  json=$(FM_FRICTION_OBSERVATIONS=5 fr "$home" show loud-sig)
+  printf '%s' "$json" | jq -e '
+    .count == 80 and (.tasks | sort) == ["task-a", "task-b"]
+    and .first_seen != null and (.observations | length) == 5
+    and .observations_dropped == 75
+  ' >/dev/null || fail "count and tasks must survive teardown of every reporting task: $json"
+
+  # Re-folding must not inflate: the same events seen again are the same events.
+  total=$(FM_FRICTION_OBSERVATIONS=5 fr "$home" show loud-sig | jq -r '.count')
+  FM_FRICTION_OBSERVATIONS=5 fr "$home" ingest
+  [ "$(FM_FRICTION_OBSERVATIONS=5 fr "$home" show loud-sig | jq -r '.count')" = "$total" ] \
+    || fail "re-ingesting must not inflate a windowed count"
+
+  # And a log recreated for the same task after its observations were evicted
+  # must ADD its new events rather than be absorbed. This is the case a tally
+  # that took a maximum silently swallowed.
+  for i in $(seq 1 10); do
+    status_append "$home" task-a "friction: [sig=loud-sig] a later run occurrence $i"
+  done
+  FM_FRICTION_OBSERVATIONS=5 fr "$home" ingest || fail "ingest of a recreated log must succeed"
+  FM_FRICTION_OBSERVATIONS=5 fr "$home" show loud-sig | jq -e '.count == 90' >/dev/null \
+    || fail "a recreated log must add its events on top of the tally: $(FM_FRICTION_OBSERVATIONS=5 fr "$home" show loud-sig | jq -c '{count,dropped_counts}')"
+  pass "the observation window bounds the record while count and tasks stay exact"
+}
+
+test_triage_preserves_the_exact_count() {
+  local home
+  home=$(make_home triage-count)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  local i
+  for i in $(seq 1 15); do
+    status_append "$home" task-a "friction: [sig=agents-md-conflict] task-a occurrence $i"
+    status_append "$home" task-b "friction: [sig=agents-md-conflict] task-b occurrence $i"
+  done
+  FM_FRICTION_OBSERVATIONS=3 fr "$home" ingest
+
+  # Every triage command rewrites the record through the durable field list, so
+  # a per-task tally missing from that list is silently dropped the first time
+  # the captain touches a signature.
+  FM_FRICTION_OBSERVATIONS=3 fr "$home" draft agents-md-conflict --outcome keep >/dev/null \
+    || fail "drafting must succeed"
+  FM_FRICTION_OBSERVATIONS=3 fr "$home" approve agents-md-conflict --issue https://example.invalid/1 >/dev/null \
+    || fail "approving must succeed"
+
+  # Asserted only after teardown. While the status logs are present the live
+  # fold still supplies every event, so a tally lost in a triage rewrite stays
+  # invisible; the record is the sole source exactly once the logs are gone.
+  rm -f "$home"/state/task-a.status "$home"/state/task-b.status
+  FM_FRICTION_OBSERVATIONS=3 fr "$home" ingest || fail "ingest after teardown must succeed"
+  FM_FRICTION_OBSERVATIONS=3 fr "$home" show agents-md-conflict | jq -e '
+    .count == 30 and (.tasks | sort) == ["task-a", "task-b"] and .state == "kept"
+  ' >/dev/null || fail "triage must not collapse the exact count: $(FM_FRICTION_OBSERVATIONS=3 fr "$home" show agents-md-conflict)"
+  pass "triage rewrites preserve the exact occurrence count"
+}
+
+test_settled_signature_cannot_be_redrafted() {
+  local home rc
+  home=$(make_home settled-redraft)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=agents-md-conflict] advice contradicts a hook"
+  status_append "$home" task-b "friction: [sig=agents-md-conflict] and again here"
+  fr "$home" draft agents-md-conflict --outcome keep >/dev/null
+  fr "$home" approve agents-md-conflict --issue https://example.invalid/1 >/dev/null
+
+  # draft creates exactly the pending draft cancel accepts, so an ungated draft
+  # walks a settled signature back to surfaced one step further out.
+  set +e
+  fr "$home" draft agents-md-conflict --outcome clear >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "drafting a settled signature must be refused"
+  [ "$(counts "$home")" = "0 0 0 1" ] \
+    || fail "a settled signature must stay settled, got: $(counts "$home")"
+  fr "$home" show agents-md-conflict | jq -e '
+    .state == "kept" and .surfaced == false and .draft == null
+    and .outcome == "keep" and .issue_url == "https://example.invalid/1"
+  ' >/dev/null || fail "the settled record must be untouched by a refused draft"
+  pass "a settled signature cannot be revived by drafting and then cancelling"
+}
+
 # --- 7. durability across teardown ------------------------------------------
 
 test_friction_survives_teardown() {
@@ -656,7 +801,11 @@ test_guard_classification_survives_the_slugs_spelling
 test_bearings_never_batches_a_guard_into_the_ranked_list
 test_cancelled_draft_returns_to_surfaced
 test_cancel_without_a_pending_draft_is_refused
+test_settled_signature_cannot_be_redrafted
 test_settled_signature_keeps_counting_and_never_resurfaces
+test_large_store_stays_readable_and_never_renders_blind
+test_observation_window_bounds_the_record_without_losing_counts
+test_triage_preserves_the_exact_count
 test_ingest_is_idempotent
 test_friction_is_transparent_to_state_readers
 test_friction_only_delta_fails_closed

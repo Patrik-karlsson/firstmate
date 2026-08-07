@@ -237,11 +237,16 @@ status_line_verb() {  # <status-line> -> leading verb word
   _fm_status_line_verb "$1"
   printf '%s' "$_FM_STATUS_LINE_VERB"
 }
-status_line_note() {  # <status-line> -> text after the first colon, trimmed
+_fm_status_line_note() {  # <status-line> -> sets _FM_STATUS_LINE_NOTE
+  local n
   case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *) printf '%s' "$1" ;;
+    *:*) n=${1#*:}; _FM_STATUS_LINE_NOTE=${n#"${n%%[![:space:]]*}"} ;;
+    *) _FM_STATUS_LINE_NOTE=$1 ;;
   esac
+}
+status_line_note() {  # <status-line> -> text after the first colon, trimmed
+  _fm_status_line_note "$1"
+  printf '%s' "$_FM_STATUS_LINE_NOTE"
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   local prefix=${1%%:*} k
@@ -680,39 +685,60 @@ FM_CLASSIFY_FRICTION_TEXT_MAX_DEFAULT=200
 # separator the readers below emit, so it cannot survive inside a value; every
 # other character is preserved exactly, which is what keeps an unclassified
 # line's own text readable when it surfaces.
-_fm_friction_flatten() {  # <text>
+#
+# Each parser below comes in two forms, for the same reason status_line_verb
+# does: a setter that resolves into a named global through parameter expansion
+# alone, and a value-returning wrapper over it. The scan under them runs every
+# parser once per friction line of every status log on the fleet-snapshot read
+# path, so a $(...) per parser is four forks per accumulated line. The setters
+# use distinct globals so a caller can hold a signature while resolving a text.
+_fm_friction_flatten_var() {  # <text> -> sets _FM_FRICTION_FLAT
   local t=${1//$'\t'/ } max
   t=${t#"${t%%[![:space:]]*}"}
   t=${t%"${t##*[![:space:]]}"}
   max=${FM_CLASSIFY_FRICTION_TEXT_MAX:-$FM_CLASSIFY_FRICTION_TEXT_MAX_DEFAULT}
   case "$max" in ''|*[!0-9]*|0) max=$FM_CLASSIFY_FRICTION_TEXT_MAX_DEFAULT ;; esac
   [ "${#t}" -le "$max" ] || t="${t:0:$max}..."
-  printf '%s' "$t"
+  _FM_FRICTION_FLAT=$t
+}
+_fm_friction_flatten() {  # <text>
+  _fm_friction_flatten_var "$1"
+  printf '%s' "$_FM_FRICTION_FLAT"
 }
 
-status_line_friction_sig() {  # <status-line> -> sig slug; 1 when absent/malformed
-  local note k
-  note=$(status_line_note "$1")
-  case "$note" in
+_fm_status_line_friction_sig() {  # <status-line> -> sets _FM_FRICTION_SIG; 1 when absent/malformed
+  local k
+  _fm_status_line_note "$1"
+  case "$_FM_STATUS_LINE_NOTE" in
     '[sig='*']'*) ;;
     *) return 1 ;;
   esac
-  k=${note#\[sig=}
+  k=${_FM_STATUS_LINE_NOTE#\[sig=}
   k=${k%%\]*}
   case "$k" in
     ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
-    *) printf '%s' "$k" ;;
   esac
+  _FM_FRICTION_SIG=$k
+}
+status_line_friction_sig() {  # <status-line> -> sig slug; 1 when absent/malformed
+  _fm_status_line_friction_sig "$1" || return 1
+  printf '%s' "$_FM_FRICTION_SIG"
 }
 
-status_line_friction_text() {  # <status-line> -> observation, sig token removed
-  local note rest
-  note=$(status_line_note "$1")
-  case "$note" in
-    '[sig='*']'*) rest=${note#*\]}; rest=${rest#"${rest%%[![:space:]]*}"} ;;
-    *) rest=$note ;;
+_fm_status_line_friction_text() {  # <status-line> -> sets _FM_FRICTION_TEXT
+  local rest
+  _fm_status_line_note "$1"
+  case "$_FM_STATUS_LINE_NOTE" in
+    '[sig='*']'*)
+      rest=${_FM_STATUS_LINE_NOTE#*\]}
+      _FM_FRICTION_TEXT=${rest#"${rest%%[![:space:]]*}"}
+      ;;
+    *) _FM_FRICTION_TEXT=$_FM_STATUS_LINE_NOTE ;;
   esac
-  printf '%s' "$rest"
+}
+status_line_friction_text() {  # <status-line> -> observation, sig token removed
+  _fm_status_line_friction_text "$1"
+  printf '%s' "$_FM_FRICTION_TEXT"
 }
 
 # Every friction event in ONE status log, as "<ordinal>\t<sig>\t<observation>".
@@ -728,8 +754,12 @@ status_line_friction_text() {  # <status-line> -> observation, sig token removed
 # line as its observation, so a worker's typo degrades into a visible
 # unclassified record instead of a silent loss. Observation text is last in the
 # record, so a reader splitting on TAB can take the remainder verbatim.
-status_friction_events() {  # <status-file>
-  local f=$1 line friction sig text n=0
+#
+# The emitter takes a record PREFIX so the fleet-wide scan below can put its task
+# id in front without a second parse or a per-file subshell. Both entry points
+# share it, so a friction line is still parsed in exactly one place.
+_fm_friction_events_stream() {  # <status-file> <record-prefix>
+  local f=$1 prefix=$2 line friction n=0
   { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ]; } || return 0
   friction=${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
@@ -742,15 +772,19 @@ status_friction_events() {  # <status-file>
     _fm_status_line_verb "$line"
     [ "$_FM_STATUS_LINE_VERB" = "$friction" ] || continue
     n=$((n + 1))
-    if sig=$(status_line_friction_sig "$line"); then
-      text=$(status_line_friction_text "$line")
+    if _fm_status_line_friction_sig "$line"; then
+      _fm_status_line_friction_text "$line"
     else
-      sig=$FM_CLASSIFY_FRICTION_UNCLASSIFIED
-      text=$line
+      _FM_FRICTION_SIG=$FM_CLASSIFY_FRICTION_UNCLASSIFIED
+      _FM_FRICTION_TEXT=$line
     fi
-    printf '%s\t%s\t%s\n' "$n" "$sig" "$(_fm_friction_flatten "$text")"
+    _fm_friction_flatten_var "$_FM_FRICTION_TEXT"
+    printf '%s%s\t%s\t%s\n' "$prefix" "$n" "$_FM_FRICTION_SIG" "$_FM_FRICTION_FLAT"
   done < "$f"
   return 0
+}
+status_friction_events() {  # <status-file>
+  _fm_friction_events_stream "$1" ""
 }
 
 # 0 when every non-blank line appended to <status-file> beyond <previous-size>
@@ -798,16 +832,11 @@ status_delta_is_friction_only() {  # <status-file> <previous-size>
 # friction line is parsed. Symlinked status files are rejected by that function
 # before any read, matching scan_open_decisions.
 scan_friction() {  # <state>
-  local state=$1 f task line
+  local state=$1 f task
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
-    task=$(basename "$f"); task="${task%.status}"
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      printf '%s\t%s\n' "$task" "$line"
-    done <<EOF
-$(status_friction_events "$f")
-EOF
+    task=${f##*/}; task="${task%.status}"
+    _fm_friction_events_stream "$f" "$task"$'\t'
   done
   return 0
 }

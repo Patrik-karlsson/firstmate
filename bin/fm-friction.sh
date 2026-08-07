@@ -22,10 +22,35 @@
 # `ingest` is the write path; every triage command ingests first.
 #
 # Records. One durable record per signature at data/friction/<sig>.json, holding
-# sig, first_seen, last_seen, count, tasks[], projects[], observations[], state,
-# plus security, outcome, issue_url, and draft. The unattributable aggregate
-# lives at data/friction/@unclassified.json; `@` is not a legal signature
-# character, so it can never collide with a real signature.
+# sig, first_seen, last_seen, count, tasks[], dropped_counts{}, projects[],
+# observations[], state, plus security, outcome, issue_url, and draft. The
+# unattributable aggregate lives at data/friction/@unclassified.json; `@` is not
+# a legal signature character, so it can never collide with a real signature.
+#
+# A record is BOUNDED; the history it summarises is not. Nothing prunes a
+# signature - a settled one keeps counting, and teardown folds a task's events
+# in so they outlive the task - so retaining every observation would grow one
+# file without limit until it could no longer be read at all. Only the
+# observation TEXTS are windowed, and only for tasks that are already gone:
+#   An observation whose task still has a status log is RE-DERIVABLE, so it is
+#   never evicted. That is not an optimisation: teardown folds one last time
+#   while the log still exists, and evicting there would discard the events that
+#   fold exists to preserve. Once the log is gone the record is the only source,
+#   and the FM_FRICTION_OBSERVATIONS most recent of those are kept.
+#   count, tasks[] and first_seen/last_seen stay EXACT and never shrink, because
+#   they are what the threshold, the counts and the ranking read. dropped_counts
+#   carries the per-task eviction tally, and count is that tally plus what the
+#   current fold can see - exact whether a log is folded again unchanged (the
+#   same events, adding nothing) or recreated after its observations were
+#   evicted (new events, added on top).
+#   observations_dropped states how many occurrences the window does not show,
+#   so a reader is never left to assume the array is the whole history.
+# Ordering inside the window is the fold's sort order (at, task, ordinal); every
+# live event in one fold shares that fold's timestamp, so "most recent" is exact
+# across folds and by task order within one.
+# The unclassified aggregate is windowed too. Its texts are the only value it
+# carries, but exempting it would restore unbounded growth for exactly the
+# repeated-typo case; counts.unclassified stays exact and the drop is disclosed.
 #
 # States are new, surfaced, cleared, kept, and dismissed. The aggregate record
 # carries the non-signature state `unclassified` and never enters triage.
@@ -79,7 +104,10 @@
 # and refuses a signature that has none. `dismiss` is the separate,
 # explicit act for a signature that is not a real pattern. A kept or dismissed
 # signature keeps counting and never re-surfaces, so friction that was accepted
-# once and later became severe is still visible on inspection.
+# once and later became severe is still visible on inspection - visible, not
+# re-triageable: `draft` refuses a settled signature, because drafting one and
+# then cancelling the draft would otherwise walk it back to `surfaced` still
+# carrying the outcome and issue it was settled with.
 #
 # Scope: this home only. Records are keyed to the home's own data/ and state/,
 # so a signature hit once in the main home and once in a secondmate home does
@@ -90,6 +118,8 @@
 #   FM_FRICTION_THRESHOLD      distinct tasks required to surface (default 2)
 #   FM_FRICTION_RECORDS        max records in the rendered model (default 50);
 #                              the COUNTS are always computed over every record
+#   FM_FRICTION_OBSERVATIONS   observation texts retained per record (default
+#                              20); count, tasks and first/last_seen stay exact
 #   FM_FRICTION_GUARD_TOKENS   extra security-guard tokens, space-separated
 #   FM_FRICTION_NOW            fixed timestamp, for deterministic tests
 set -eu
@@ -127,6 +157,8 @@ FM_FRICTION_THRESHOLD=${FM_FRICTION_THRESHOLD:-2}
 case "$FM_FRICTION_THRESHOLD" in ''|*[!0-9]*|0) die "FM_FRICTION_THRESHOLD must be a positive integer" ;; esac
 FM_FRICTION_RECORDS=${FM_FRICTION_RECORDS:-50}
 case "$FM_FRICTION_RECORDS" in ''|*[!0-9]*|0) die "FM_FRICTION_RECORDS must be a positive integer" ;; esac
+FM_FRICTION_OBSERVATIONS=${FM_FRICTION_OBSERVATIONS:-20}
+case "$FM_FRICTION_OBSERVATIONS" in ''|*[!0-9]*|0) die "FM_FRICTION_OBSERVATIONS must be a positive integer" ;; esac
 
 # The tracked containment-guard identities. Extended, never replaced, by
 # FM_FRICTION_GUARD_TOKENS - see the carve-out note in the header.
@@ -210,6 +242,21 @@ live_json() {  # <now>
           at: $at } ]'
 }
 
+# Task ids that still have a status log in this home. Bounded by the live fleet
+# rather than by history, so it travels on argv like every other fleet-bounded
+# input. merged_model needs it to tell a re-derivable observation from one that
+# only the record still holds.
+live_tasks_json() {
+  local f task
+  {
+    for f in "$STATE"/*.status; do
+      [ -e "$f" ] || continue
+      task=${f##*/}; task=${task%.status}
+      printf '%s\n' "$task"
+    done
+  } | jq -R -s 'split("\n") | map(select(length > 0))'
+}
+
 # Every durable record, as one JSON array in glob order.
 #
 # Read in ONE jq pass. A settled signature is never pruned by design, so a home's
@@ -246,15 +293,25 @@ stored_json() {
 # recreated log whose ordinal 3 holds different text would silently overwrite
 # the stored one. Including the text turns that silent loss into two honest
 # records, and re-ingesting an unchanged log stays exactly idempotent.
+#
+# Both inputs arrive on STDIN rather than through --argjson. They are the one
+# pair of inputs in this repo with unbounded monotonic growth by design, and a
+# single argv string is capped far below ARG_MAX (32 pages on Linux), so an
+# --argjson transport turns an accumulating store into an unreadable one that
+# ingest can no longer shrink. Capturing each into a shell variable first is
+# also what makes a read failure propagate: a command substitution nested in an
+# argument list discards its exit status.
 merged_model() {  # <now>
-  local now=$1
-  jq -n \
+  local now=$1 live stored
+  live=$(live_json "$now") || return 1
+  stored=$(stored_json) || return 1
+  printf '%s\n%s\n' "$live" "$stored" | jq -n \
     --arg now "$now" \
     --arg unclassified "$UNCLASSIFIED" \
     --arg guards "$GUARD_TOKENS" \
     --argjson threshold "$FM_FRICTION_THRESHOLD" \
-    --argjson live "$(live_json "$now")" \
-    --argjson stored "$(stored_json)" '
+    --argjson window "$FM_FRICTION_OBSERVATIONS" \
+    --argjson live_tasks "$(live_tasks_json)" '
     def obskey: [.task, (.ordinal | tostring), .text] | join(" ");
     # Fold a slug to its comparison form: one case, one segment separator. The
     # slug grammar admits `_`, `.` and capitals, so a raw hyphen-run match would
@@ -265,26 +322,65 @@ merged_model() {  # <now>
       ("-" + ($sig | slugfold) + "-") as $h
       | any($tokens[]; ("-" + slugfold + "-") as $t | ($h | contains($t)));
 
-    ($guards | split(" ") | map(select(length > 0)) | unique) as $gt
-    | ([$stored[].sig] + [$live[].sig] | unique) as $sigs
+    (input) as $live
+    | (input) as $stored
+    | ($guards | split(" ") | map(select(length > 0)) | unique) as $gt
+    | ($live | group_by(.sig) | map({key: .[0].sig, value: .}) | from_entries) as $live_by_sig
+    | ($stored | map({key: .sig, value: .}) | from_entries) as $stored_by_sig
+    | (($stored | map(.sig)) + ($live | map(.sig)) | unique) as $sigs
     | [ $sigs[] as $s
-        | ([$stored[] | select(.sig == $s)] | first) as $rec
-        | ((($rec.observations // []) + [$live[] | select(.sig == $s)])
+        | ($stored_by_sig[$s] // null) as $rec
+        | ((($rec.observations // []) + ($live_by_sig[$s] // []))
            | group_by(obskey) | map(sort_by(.at) | .[0])
            | sort_by([.at, .task, .ordinal])) as $obs
-        | ($obs | map(.task) | unique) as $tasks
-        | ($obs | map(.project) | map(select(. != null and . != "")) | unique) as $projects
-        | ($obs | map(.at) | sort) as $ats
+        # An observation belonging to a task whose status log still exists is
+        # RE-DERIVABLE - the next fold reads it again - so evicting it would
+        # lose nothing now and everything at teardown, which folds one last time
+        # while the log is still there. Only observations whose task no longer
+        # has a log are evictable, and each eviction is added to the permanent
+        # dropped tally for the task it belonged to.
+        #
+        # count is then dropped + what this fold can see, per task. That is
+        # exact in both directions a plain tally is not: re-folding an unchanged
+        # log sees the same events and adds nothing, while a log recreated for a
+        # task whose earlier observations were already evicted still adds its new
+        # events on top of the tally. Taking a maximum instead would silently
+        # swallow that second case, and counting the retained window alone would
+        # shrink `count` to the window.
+        | ($live_tasks | map({key: ., value: true}) | from_entries) as $is_live
+        | ($obs | map(select($is_live[.task] // false))) as $live_obs
+        | ($obs | map(select(($is_live[.task] // false) | not))) as $dead_obs
+        | (if ($dead_obs | length) > $window
+           then ($dead_obs | .[:(length - $window)]) else [] end) as $evicted
+        | ($rec.dropped_counts // {}) as $prev_dropped
+        | ($evicted | group_by(.task) | map({key: .[0].task, value: length}) | from_entries) as $evicted_tc
+        | ((($prev_dropped | keys) + ($evicted_tc | keys) | unique) as $ks
+           | [ $ks[] | {key: ., value: (($prev_dropped[.] // 0) + ($evicted_tc[.] // 0))} ]
+           | from_entries) as $dropped_counts
+        | ($obs | group_by(.task) | map({key: .[0].task, value: length}) | from_entries) as $obs_tc
+        | ((($prev_dropped | keys) + ($obs_tc | keys) | unique) as $ks2
+           | [ $ks2[] | {key: ., value: (($prev_dropped[.] // 0) + ($obs_tc[.] // 0))} ]
+           | from_entries) as $tc
+        | ([$tc[]] | add // 0) as $count
+        | ($tc | keys) as $tasks
+        | ((($rec.projects // []) + ($obs | map(.project)))
+           | map(select(. != null and . != "")) | unique) as $projects
+        | ([$rec.first_seen // empty] + ($obs | map(.at)) | min) as $first_seen
+        | ([$rec.last_seen // empty] + ($obs | map(.at)) | max) as $last_seen
+        | (($live_obs + ($dead_obs | .[-$window:]))
+           | sort_by([.at, .task, .ordinal])) as $kept
         | (if $s == $unclassified then "unclassified" else ($rec.state // "new") end) as $state
         | guardmatch($s; $gt) as $security
         | {
             sig: $s,
-            first_seen: ($ats | first),
-            last_seen: ($ats | last),
-            count: ($obs | length),
+            first_seen: $first_seen,
+            last_seen: $last_seen,
+            count: $count,
             tasks: $tasks,
+            dropped_counts: $dropped_counts,
             projects: $projects,
-            observations: $obs,
+            observations: $kept,
+            observations_dropped: ($count - ($kept | length)),
             state: $state,
             security: $security,
             outcome: ($rec.outcome // null),
@@ -320,15 +416,23 @@ merged_model() {  # <now>
 # and every per-signature lookup work over the COMPLETE record set, and the
 # three counts above are always computed over every record. Only the rendered
 # list is bounded, and it discloses what it dropped.
+#
+# Refuses a blank or shapeless model rather than rendering it. An empty home is
+# a VALID model with zeroed counts and an empty record list; an empty STRING is
+# a failed read upstream, and letting that through would print a section with no
+# counts at all - the blind section the counts exist to prevent.
 cap_model() {  # <model-json>
+  [ -n "${1//[[:space:]]/}" ] || return 1
   printf '%s' "$1" | jq --argjson cap "$FM_FRICTION_RECORDS" '
-    .records_truncated = ([(.records | length) - $cap, 0] | max)
-    | .records |= .[:$cap]'
+    if (type == "object" and has("counts")) then
+      .records_truncated = ([(.records | length) - $cap, 0] | max)
+      | .records |= .[:$cap]
+    else error("friction model is not a readable record set") end'
 }
 
 # Strip the derived view fields before persisting: threshold-dependent verdicts
 # must be recomputed on read, never frozen into the record.
-DURABLE_FIELDS='{sig,first_seen,last_seen,count,tasks,projects,observations,state,security,outcome,issue_url,draft}'
+DURABLE_FIELDS='{sig,first_seen,last_seen,count,tasks,dropped_counts,projects,observations,state,security,outcome,issue_url,draft}'
 
 write_record() {  # <record-json>
   local rec=$1 sig path tmp
@@ -350,7 +454,7 @@ write_record() {  # <record-json>
 ingest() {
   local now model promoted rec
   now=$(now_ts)
-  model=$(merged_model "$now")
+  model=$(merged_model "$now") || die "could not read friction records"
   # Every record, never the capped rendering set: a rendering bound must never
   # decide what gets persisted.
   promoted=$(printf '%s' "$model" | jq -c --arg u "$UNCLASSIFIED" '
@@ -372,8 +476,9 @@ EOF
 
 # Read one signature's current record, ingest-free.
 read_record() {  # <sig>
-  local sig=$1
-  merged_model "$(now_ts)" | jq -e --arg s "$sig" '.records[] | select(.sig == $s)' \
+  local sig=$1 model
+  model=$(merged_model "$(now_ts)") || die "could not read friction records"
+  printf '%s' "$model" | jq -e --arg s "$sig" '.records[] | select(.sig == $s)' \
     || die "no friction record for signature: $sig"
 }
 
@@ -404,6 +509,7 @@ update_record() {  # <sig> <jq-expr> [--arg name value]...
 # --- rendering --------------------------------------------------------------
 
 render_text() {  # <model-json>
+  [ -n "${1//[[:space:]]/}" ] || die "could not read friction records"
   printf '%s' "$1" | jq -r --arg u "$UNCLASSIFIED" '
     "FRICTION (threshold: \(.threshold) distinct tasks)",
     "counts: surfaced=\(.counts.surfaced) suppressed=\(.counts.suppressed) unclassified=\(.counts.unclassified) settled=\(.counts.settled)",
@@ -521,7 +627,8 @@ case "$cmd" in
       case "$LIMIT" in ''|*[!0-9]*|0) die "--limit must be a positive integer" ;; esac
       FM_FRICTION_RECORDS=$LIMIT
     fi
-    MODEL=$(cap_model "$(merged_model "$(now_ts)")")
+    RAW=$(merged_model "$(now_ts)") || die "could not read friction records"
+    MODEL=$(cap_model "$RAW") || die "could not read friction records"
     if [ "$FORMAT" = json ]; then printf '%s\n' "$MODEL"; else render_text "$MODEL"; fi
     ;;
 
@@ -549,6 +656,13 @@ case "$cmd" in
     [ -n "$OUTCOME" ] || die "draft requires --outcome"
     ingest
     REC=$(read_record "$SIG")
+    # A settled signature is not re-drafted. Without this gate `draft` creates
+    # the pending draft that `cancel` accepts, and the pair walks a cleared,
+    # kept or dismissed record back to `surfaced` while it still carries its
+    # outcome and filed issue. It keeps counting and stays visible to `show`
+    # and `list`; what it does not do is re-enter triage.
+    printf '%s' "$REC" | jq -e '.eligible' >/dev/null \
+      || die "$SIG is already settled ($(printf '%s' "$REC" | jq -r '.state')); a settled signature keeps counting and never re-enters triage"
     printf '%s' "$REC" | jq -e '.above_threshold' >/dev/null \
       || die "$SIG is below the recurrence threshold ($FM_FRICTION_THRESHOLD distinct tasks); it is recorded, not surfaced"
     printf '%s' "$REC" | jq -e --arg o "$OUTCOME" '.outcomes | index($o)' >/dev/null \
@@ -598,9 +712,11 @@ case "$cmd" in
     # settled signature keeps counting but never re-surfaces.
     printf '%s' "$REC" | jq -e '.draft != null' >/dev/null \
       || die "$SIG has no pending draft to cancel; dismiss is the separate act for a signature that is not a real pattern"
-    # Rejecting a draft rejects the wording, not the finding: the signature goes
-    # back to `surfaced` and stays eligible. `dismiss` is the separate act.
-    update_record "$SIG" '.draft = null | .state = "surfaced"'
+    # Rejecting a draft rejects the wording, not the finding: dropping the draft
+    # leaves the signature exactly where drafting found it, which for a drafted
+    # signature is `surfaced`. Assigning the state here instead would be a way
+    # to promote a record that was never eligible to hold a draft at all.
+    update_record "$SIG" '.draft = null'
     printf '%s: draft cancelled, back to surfaced\n' "$SIG"
     ;;
 
