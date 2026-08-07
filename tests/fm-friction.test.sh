@@ -1130,6 +1130,37 @@ test_unreadable_store_reports_unavailable_not_empty() {
   pass "an unreadable store reports unavailable rather than empty"
 }
 
+test_stored_signature_cannot_collide_with_a_legitimate_record() {
+  local home json
+  home=$(make_home sig-collision)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=abc] real observation one"
+  status_append "$home" task-b "friction: [sig=abc] real observation two"
+  fr "$home" ingest || fail "ingest must succeed for the legitimate signature"
+  [ "$(fr "$home" show abc | jq -r '.count')" = "2" ] \
+    || fail "the legitimate record must read as two occurrences first"
+
+  # A signature the parser can never emit, but a hand-corrected record file can:
+  # the writer derives its filename through a command substitution, which strips
+  # a trailing newline, so a screen that admits "abc\n" writes it over `abc`.
+  jq -n '{sig:"abc\n",first_seen:"2026-01-01T00:00:00Z",last_seen:"2026-01-01T00:00:00Z",
+          count:999,tasks:["ghost"],dropped_counts:{"ghost":999},projects:[],
+          observations:[],state:"new",security:false,outcome:null,issue_url:null,draft:null}' \
+    > "$home/data/friction/zzz-weird.json"
+  rm -f "$home"/state/task-a.status "$home"/state/task-b.status
+  fr "$home" ingest || fail "ingest must survive a shape-legal but illegal-signature record"
+
+  json=$(fr "$home" list --json)
+  printf '%s' "$json" | jq -e '
+    .counts.surfaced == 1
+    and ([.records[].sig] == ["abc"])
+  ' >/dev/null || fail "the legitimate signature must survive a colliding record: $(printf '%s' "$json" | jq -c '{counts, sigs:[.records[].sig]}')"
+  fr "$home" show abc | jq -e '.count == 2 and (.tasks | sort) == ["task-a", "task-b"]' \
+    >/dev/null || fail "the legitimate record must keep its count and tasks: $(fr "$home" show abc | jq -c '{count,tasks}')"
+  pass "an illegal stored signature cannot overwrite a legitimate record"
+}
+
 # --- 7. durability across teardown ------------------------------------------
 
 test_friction_survives_teardown() {
@@ -1250,6 +1281,7 @@ test_signature_grammar_agrees_across_its_consumers
 test_dismiss_refuses_a_settled_signature
 test_unclassified_aggregate_survives_the_record_cap
 test_unreadable_store_reports_unavailable_not_empty
+test_stored_signature_cannot_collide_with_a_legitimate_record
 test_friction_survives_teardown
 test_ingest_leaves_a_frictionless_home_untouched
 

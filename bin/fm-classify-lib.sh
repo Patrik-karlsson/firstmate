@@ -762,12 +762,22 @@ _fm_friction_flatten() {  # <text>
 # stored-record screen (jq). A signature legal to parse but rejected by one of
 # the others becomes a record that is written and then unreadable, which is the
 # silent loss the unclassified sentinel exists to prevent - so the rule cannot
-# be hand-copied per consumer. The regex below is the ERE encoding of the same
-# accept set as the shell pattern: non-empty, every character in the class, and
-# a first character that is not `.` (a leading dot would make the record a
-# dotfile the reading glob never matches).
+# be hand-copied per consumer. The regex below encodes the same accept set as
+# the shell pattern: non-empty, every character in the class, and a first
+# character that is not `.` (a leading dot would make the record a dotfile the
+# reading glob never matches).
+#
+# The anchors are ABSOLUTE - `\A` and `\z`, not `^` and `$`. jq's test() is
+# Oniguruma, where `$` also matches before one trailing newline, so `^...$`
+# admits "abc\n" while the shell pattern refuses it. That single disagreement is
+# the worst one available: write_record derives the filename through a command
+# substitution, which strips the trailing newline, so such a record would be
+# written over the legitimate `abc` record's file and take its count, its tasks
+# and its surfaced state with it, at rc=0 and with nothing printed. `\A` is
+# spelled out alongside `\z` rather than left as `^` so the accept set does not
+# depend on which Oniguruma dialect the local jq was built with.
 # shellcheck disable=SC2034 # Read by bin/fm-friction.sh's stored-record screen, not this lib.
-FM_CLASSIFY_FRICTION_SIG_RE='^[A-Za-z0-9_-][A-Za-z0-9._-]*$'
+FM_CLASSIFY_FRICTION_SIG_RE='\A[A-Za-z0-9_-][A-Za-z0-9._-]*\z'
 
 friction_sig_is_legal() {  # <sig>
   case "$1" in
