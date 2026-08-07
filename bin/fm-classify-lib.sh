@@ -191,10 +191,10 @@ status_is_paused_or_captain_held() {  # <status-line>
 # observation that mentions friction elsewhere does not false-match. This is the
 # predicate last_status_line uses to stay transparent to friction.
 status_is_friction() {  # <status-line>
-  local line=$1 verb
+  local line=$1
   [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
-  [ "$verb" = "${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}" ]
+  _fm_status_line_verb "$line"
+  [ "$_FM_STATUS_LINE_VERB" = "${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}" ]
 }
 
 # --- durable keyed decisions ------------------------------------------------
@@ -220,12 +220,22 @@ status_is_friction() {  # <status-line>
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
-status_line_verb() {  # <status-line> -> leading verb word
+#
+# The verb parse itself, resolved into _FM_STATUS_LINE_VERB rather than through
+# a command substitution. Parameter expansion only, no subshell: the per-line
+# predicates below run this once per candidate line, per status file, per
+# supervision poll, so a $(...) here costs a fork for every friction line a
+# worker ever appended. status_line_verb is the value-returning form every
+# other caller uses, and stays the only place the rule is written.
+_fm_status_line_verb() {  # <status-line> -> sets _FM_STATUS_LINE_VERB
   local v=${1%%:*}
   v=${v%%\[key=*}
   v=${v#"${v%%[![:space:]]*}"}
-  v=${v%"${v##*[![:space:]]}"}
-  printf '%s' "$v"
+  _FM_STATUS_LINE_VERB=${v%"${v##*[![:space:]]}"}
+}
+status_line_verb() {  # <status-line> -> leading verb word
+  _fm_status_line_verb "$1"
+  printf '%s' "$_FM_STATUS_LINE_VERB"
 }
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
   case "$1" in
@@ -644,8 +654,12 @@ status_open_activities() {  # <status-file-or-dash>
 # That is a different position from the decision-key token, which sits BEFORE
 # the colon (`needs-decision [key=api-shape]: ...`), because a signature is part
 # of what the worker is reporting rather than a routing key on the event. The
-# slug charset is identical to the decision key's, so both grammars validate the
-# same way.
+# slug charset is the decision key's, with ONE added rule: a signature may not
+# begin with `.`, because a signature becomes a durable filename under
+# data/friction/ and a dotfile record is invisible to the directory glob that
+# reads those records back - a write-only record is exactly the silent loss the
+# unclassified sentinel exists to prevent. A decision key is never a filename,
+# so it keeps the bare charset.
 #
 # Payload safety is structural, not filtered. The only input is a worker's
 # one-line status append: this code never reads a command line, a matched
@@ -686,7 +700,7 @@ status_line_friction_sig() {  # <status-line> -> sig slug; 1 when absent/malform
   k=${note#\[sig=}
   k=${k%%\]*}
   case "$k" in
-    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
     *) printf '%s' "$k" ;;
   esac
 }
@@ -715,7 +729,7 @@ status_line_friction_text() {  # <status-line> -> observation, sig token removed
 # unclassified record instead of a silent loss. Observation text is last in the
 # record, so a reader splitting on TAB can take the remainder verbatim.
 status_friction_events() {  # <status-file>
-  local f=$1 line verb friction sig text n=0
+  local f=$1 line friction sig text n=0
   { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ]; } || return 0
   friction=${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
@@ -725,8 +739,8 @@ status_friction_events() {  # <status-file>
       "$friction"*|[[:space:]]*) ;;
       *) continue ;;
     esac
-    verb=$(status_line_verb "$line")
-    [ "$verb" = "$friction" ] || continue
+    _fm_status_line_verb "$line"
+    [ "$_FM_STATUS_LINE_VERB" = "$friction" ] || continue
     n=$((n + 1))
     if sig=$(status_line_friction_sig "$line"); then
       text=$(status_line_friction_text "$line")

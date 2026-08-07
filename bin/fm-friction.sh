@@ -59,8 +59,14 @@
 # prioritised list of security controls to remove.
 #
 # A signature is security-classified when any of these tokens appears as a whole
-# hyphen-delimited segment run in its slug:
+# segment run in its slug:
 #   secret credential security merge-into-main branch-protection push-protection
+# The comparison folds case and reads `_` and `.` as segment separators, so
+# `Secret_Blocker_FP` classifies exactly like `secret-blocker-fp`. Only the
+# comparison is folded; the stored signature is never rewritten. A slug the
+# grammar accepts must not be able to slip a guard past the carve-out by its
+# spelling, and the same fold is applied to the configured tokens so an extension
+# cannot be written in a form that can never match.
 # FM_FRICTION_GUARD_TOKENS EXTENDS that list (space-separated); it deliberately
 # cannot shrink it, so a home cannot switch the carve-out off. Over-classifying
 # costs one triage option; under-classifying makes the mechanism recommend
@@ -69,7 +75,8 @@
 # Triage never files anything. `draft` composes an issue and stores it for the
 # captain; `approve` records the URL of an issue that was filed separately
 # through gh-axi; `cancel` returns the signature to `surfaced` - rejecting a
-# draft rejects the wording, not the finding. `dismiss` is the separate,
+# draft rejects the wording, not the finding, so it requires a draft to reject
+# and refuses a signature that has none. `dismiss` is the separate,
 # explicit act for a signature that is not a real pattern. A kept or dismissed
 # signature keeps counting and never re-surfaces, so friction that was accepted
 # once and later became severe is still visible on inspection.
@@ -131,8 +138,12 @@ UNCLASSIFIED="$FM_CLASSIFY_FRICTION_UNCLASSIFIED"
 now_ts() { printf '%s' "${FM_FRICTION_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"; }
 
 # Durable path for a signature. Rejects anything that is not a legal slug, so a
-# signature can never escape data/friction/ - `.` and `..` pass the character
-# class but are refused explicitly.
+# signature can never escape data/friction/ nor land somewhere the read below
+# cannot see it - a leading `.` passes the character class and is refused here,
+# which covers `.` and `..` and also keeps a record out of a dotfile that
+# stored_json's glob would never match again. fm-classify-lib.sh applies the
+# same rule when it parses a signature off a status line, so a worker's typo
+# degrades into an unclassified record rather than reaching this refusal.
 record_path() {  # <sig>
   local sig=$1
   if [ "$sig" = "$UNCLASSIFIED" ]; then
@@ -140,7 +151,7 @@ record_path() {  # <sig>
     return 0
   fi
   case "$sig" in
-    ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
   printf '%s/%s.json' "$FRICTION_DIR" "$sig"
 }
@@ -150,18 +161,36 @@ record_path() {  # <sig>
 # record keeps only the final component. That is the noun the captain uses, and
 # a record that outlives every task in it has no business carrying a local
 # filesystem path around.
+#
+# One jq for the whole map rather than one per task: every read path builds this,
+# and a home accumulates task metadata for as long as it runs. The per-file read
+# is plain parameter expansion, so a fleet with many tasks costs one process, not
+# three per task. TAB separates the two fields; a project name is the final path
+# component of a clone directory, so it cannot contain one.
 project_map_json() {
-  local m task p
+  local m task line p
   {
     for m in "$STATE"/*.meta; do
       [ -e "$m" ] || continue
-      task=$(basename "$m"); task=${task%.meta}
-      p=$(grep '^project=' "$m" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      task=${m##*/}; task=${task%.meta}
+      p=""
+      if [ -f "$m" ] && [ -r "$m" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+          case "$line" in
+            project=*) p=${line#project=} ;;
+          esac
+        done < "$m"
+      fi
       p=${p%/}
       p=${p##*/}
-      jq -n --arg t "$task" --arg p "$p" '{key:$t,value:$p}'
+      printf '%s\t%s\n' "$task" "$p"
     done
-  } | jq -s 'from_entries'
+  } | jq -R -s '
+    [ split("\n")[]
+      | select(length > 0)
+      | (. / "\t") as $f
+      | {key: $f[0], value: ($f[1:] | join("\t"))} ]
+    | from_entries'
 }
 
 # Live friction events across every status log in this home, as JSON. The parse
@@ -181,11 +210,28 @@ live_json() {  # <now>
           at: $at } ]'
 }
 
+# Every durable record, as one JSON array in glob order.
+#
+# Read in ONE jq pass. A settled signature is never pruned by design, so a home's
+# record count only grows, and bin/fm-fleet-snapshot.sh reads this on every
+# snapshot - a jq per record would put that growth on the /bearings path. The
+# single pass aborts on the first unparseable record, which would lose every
+# good record with it, so the per-file loop stays as the fallback: one corrupt
+# record must cost its own row and nothing else.
 stored_json() {
-  local f
+  local f out
+  set --
+  for f in "$FRICTION_DIR"/*.json; do
+    [ -e "$f" ] || continue
+    set -- "$@" "$f"
+  done
+  [ "$#" -gt 0 ] || { printf '[]'; return 0; }
+  if out=$(jq -s -c '[ .[] | select(type == "object" and (.sig | type) == "string") ]' "$@" 2>/dev/null); then
+    printf '%s' "$out"
+    return 0
+  fi
   {
-    for f in "$FRICTION_DIR"/*.json; do
-      [ -e "$f" ] || continue
+    for f in "$@"; do
       jq -c 'select(type == "object" and (.sig | type) == "string")' "$f" 2>/dev/null || true
     done
   } | jq -s '.'
@@ -210,9 +256,14 @@ merged_model() {  # <now>
     --argjson live "$(live_json "$now")" \
     --argjson stored "$(stored_json)" '
     def obskey: [.task, (.ordinal | tostring), .text] | join(" ");
+    # Fold a slug to its comparison form: one case, one segment separator. The
+    # slug grammar admits `_`, `.` and capitals, so a raw hyphen-run match would
+    # let `Secret_Blocker_FP` past the carve-out. Applied to both sides, so a
+    # configured token cannot be spelled into a form that never matches.
+    def slugfold: ascii_downcase | gsub("[._]"; "-");
     def guardmatch($sig; $tokens):
-      ("-" + $sig + "-") as $h
-      | any($tokens[]; ("-" + . + "-") as $t | ($h | contains($t)));
+      ("-" + ($sig | slugfold) + "-") as $h
+      | any($tokens[]; ("-" + slugfold + "-") as $t | ($h | contains($t)));
 
     ($guards | split(" ") | map(select(length > 0)) | unique) as $gt
     | ([$stored[].sig] + [$live[].sig] | unique) as $sigs
@@ -538,6 +589,15 @@ case "$cmd" in
 
   cancel)
     SIG=${1:-}; require_sig "$SIG"
+    ingest
+    REC=$(read_record "$SIG")
+    # Cancel rejects the wording of a PENDING draft, so a pending draft is a
+    # precondition rather than an assumption. Without it, cancelling a signature
+    # that has none would return a cleared, kept or dismissed record to
+    # `surfaced` while it still carried its outcome and filed issue - and a
+    # settled signature keeps counting but never re-surfaces.
+    printf '%s' "$REC" | jq -e '.draft != null' >/dev/null \
+      || die "$SIG has no pending draft to cancel; dismiss is the separate act for a signature that is not a real pattern"
     # Rejecting a draft rejects the wording, not the finding: the signature goes
     # back to `surfaced` and stays eligible. `dismiss` is the separate act.
     update_record "$SIG" '.draft = null | .state = "surfaced"'

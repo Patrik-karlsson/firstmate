@@ -53,7 +53,7 @@
 #   --all-recorded-prs include every locally recorded PR
 #   --all-unhealthy  include every unhealthy endpoint
 #   --all-pr-repos   query every discovered repository under --include-prs
-#   --all-friction   include every surfaced friction signature
+#   --all-friction   include every surfaced friction signature and guard
 #   -h,--help        usage
 #
 # The friction surface reports the three mandatory counts as flat scalar fields
@@ -63,6 +63,14 @@
 # scalars and arrays of uniform scalar objects, and a nested object would come
 # out as an opaque quoted blob. Without those counts a quiet friction section is
 # indistinguishable from a blind one.
+#
+# Surfaced signatures come out in TWO arrays, and both render even when empty for
+# the same reason the counts do: friction[] is the ranked pattern list, and
+# friction_guards[] holds every signature naming a containment guard. A guard is
+# never batched with ordinary friction, here or in bin/fm-friction.sh's own
+# rendering, because this mechanism ranks by how often something impeded work -
+# the right signal for a broken helper and the wrong one for a guard. Each array
+# is bounded independently by FM_BEARINGS_FRICTION with its own omitted[] row.
 #
 # Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
 set -u
@@ -123,10 +131,12 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   unhealthy_endpoints{...} (only when non-empty),
   friction_surfaced, friction_suppressed, friction_unclassified,
   friction_settled, friction{sig,state,security,tasks,count,outcomes,last},
-  omitted{surface,reveal}.
-The four friction count fields always render, including when all are zero: a
-  quiet friction section must be distinguishable from a blind one. friction[]
-  carries surfaced signatures plus the unattributable aggregate row.
+  friction_guards{same fields}, omitted{surface,reveal}.
+The four friction count fields and both friction arrays always render, including
+  when all are zero or empty: a quiet friction section must be distinguishable
+  from a blind one. friction[] carries surfaced ordinary signatures plus the
+  unattributable aggregate row; friction_guards[] carries containment-guard
+  signatures, which are never batched into the ranked list.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -447,7 +457,16 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           tasks:((.tasks // []) | length),
           count,
           outcomes:(((.outcomes // []) | if length > 0 then join("/") else "-" end)),
-          last:(((.observations // []) | if length > 0 then .[-1].text else "-" end) | trunc(70))} ]) as $friction_all
+          last:(((.observations // []) | if length > 0 then .[-1].text else "-" end) | trunc(70))} ]) as $friction_rows
+  # A guard signature leaves the ranked list entirely. Sharing one bounded array
+  # with ordinary friction would rank a containment guard by how often it
+  # impeded work and let ordinary rows evict it from the default view, which is
+  # the prioritised-list-of-security-controls failure the carve-out exists to
+  # prevent. Each array is bounded on its own so neither can crowd the other.
+  # The unattributable aggregate carries security:false and stays with the
+  # ordinary rows.
+  | ([ $friction_rows[] | select(.security | not) ]) as $friction_all
+  | ([ $friction_rows[] | select(.security) ]) as $friction_guards_all
   | . as $snap
   | {
       schema: "fm-bearings.v1",
@@ -466,7 +485,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       friction_suppressed: ($friction.counts.suppressed // 0),
       friction_unclassified: ($friction.counts.unclassified // 0),
       friction_settled: ($friction.counts.settled // 0),
-      friction: (if $all_friction == 1 then $friction_all else $friction_all[:$friction_n] end)
+      friction: (if $all_friction == 1 then $friction_all else $friction_all[:$friction_n] end),
+      friction_guards: (if $all_friction == 1 then $friction_guards_all else $friction_guards_all[:$friction_n] end)
     }
   | . + (if ($unhealthy_all | length) > 0 then
            {unhealthy_endpoints:(if $all_unhealthy == 1 then $unhealthy_all else $unhealthy_all[:$unhealthy_n] end)}
@@ -507,6 +527,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $include_prs == 1 and $pr_repos_total > $pr_repos_shown then {surface:("PR repositories showing \($pr_repos_shown) of \($pr_repos_total)"), reveal:"--all-pr-repos"} else empty end),
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
         (if $all_friction == 0 and ($friction_all | length) > $friction_n then {surface:("friction showing \($friction_n) of \($friction_all | length)"), reveal:"--all-friction"} else empty end),
+        (if $all_friction == 0 and ($friction_guards_all | length) > $friction_n then {surface:("friction_guards showing \($friction_n) of \($friction_guards_all | length)"), reveal:"--all-friction"} else empty end),
         (($friction.records_truncated // 0) as $n | if $n > 0 then {surface:("friction records omitted by the record bound: \($n)"), reveal:"raise FM_FRICTION_RECORDS"} else empty end),
         (if $friction.available == false then {surface:("friction records unavailable: " + ($friction.reason // "read failed")), reveal:"run bin/fm-friction.sh list"} else empty end),
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }

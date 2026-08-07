@@ -181,6 +181,53 @@ test_unattributable_record_surfaces_as_unclassified() {
   pass "an unattributable record surfaces as unclassified rather than vanishing"
 }
 
+test_dot_leading_signature_is_unclassified_not_a_hidden_record() {
+  local home json before after
+  home=$(make_home dot-signature)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=.hidden-sig] a signature may not start with a dot"
+  status_append "$home" task-b "friction: [sig=.hidden-sig] and here it is again"
+
+  json=$(fr "$home" list --json)
+  printf '%s' "$json" | jq -e '
+    ([.records[].sig] | index(".hidden-sig")) == null and .counts.unclassified == 2
+  ' >/dev/null || fail "a dot-leading signature must degrade to unclassified: $json"
+
+  # The real failure this pins is durability, not naming: a record written to a
+  # dotfile is rewritten from live data on every ingest and then disappears the
+  # moment the status log is torn down. Read once with the logs present, then
+  # once after teardown removes them.
+  fr "$home" ingest || fail "ingest must succeed with a dot-leading signature present"
+  before=$(fr "$home" list --json | jq -c '[.records[] | {sig, count}]')
+  rm -f "$home"/state/task-a.status "$home"/state/task-b.status
+  after=$(fr "$home" list --json | jq -c '[.records[] | {sig, count}]')
+  [ "$before" = "$after" ] \
+    || fail "a dot-leading signature's events must survive teardown: $before vs $after"
+  pass "a dot-leading signature is preserved as unclassified, never as an unreadable record"
+}
+
+test_corrupt_record_file_costs_only_its_own_row() {
+  local home json
+  home=$(make_home corrupt-record)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=agents-md-conflict] advice contradicts a hook"
+  status_append "$home" task-b "friction: [sig=agents-md-conflict] and again here"
+  fr "$home" ingest || fail "ingest must succeed before corrupting a record"
+  printf 'not json at all {' > "$home/data/friction/corrupted.json"
+
+  # One unparseable record must not take the whole store down with it: the read
+  # is batched for speed, and a batched read that aborts on the first bad file
+  # is worse than the fork it saved.
+  json=$(fr "$home" list --json) || fail "list must survive a corrupt record file"
+  printf '%s' "$json" | jq -e '
+    .counts.surfaced == 1
+    and ([.records[].sig] | index("agents-md-conflict")) != null
+  ' >/dev/null || fail "a corrupt record must not hide the good ones: $json"
+  pass "a corrupt record file costs its own row and nothing else"
+}
+
 # --- 4. the security carve-out ----------------------------------------------
 
 # Cross the threshold for a guard signature and an ordinary one side by side.
@@ -260,6 +307,69 @@ test_guard_signature_surfaces_individually_with_its_caveat() {
   pass "a security-guard signature surfaces individually and carries its caveat"
 }
 
+test_guard_classification_survives_the_slugs_spelling() {
+  local home out rc
+  home=$(make_home guard-spelling)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  # The slug grammar admits capitals, `_` and `.`, so a guard can be named in a
+  # spelling a plain hyphen-run match would miss. Under-classifying is the
+  # expensive direction: it is what makes the mechanism recommend removing a
+  # security control.
+  status_append "$home" task-a "friction: [sig=Secret_Blocker.FP] blocker denied an edit to a docs path class"
+  status_append "$home" task-b "friction: [sig=Secret_Blocker.FP] blocker denied an edit to a fixtures path class"
+
+  out=$(fr "$home" outcomes Secret_Blocker.FP)
+  [ "$out" = "keep
+narrow" ] || fail "a guard signature must classify whatever its spelling, got: $out"
+
+  set +e
+  fr "$home" draft Secret_Blocker.FP --outcome clear >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "drafting a clear for a differently-spelled guard signature must be refused"
+
+  # The stored signature is untouched: only the comparison is folded.
+  fr "$home" show Secret_Blocker.FP | jq -e '.sig == "Secret_Blocker.FP" and .security == true' \
+    >/dev/null || fail "the record must keep the signature the worker wrote"
+
+  # An extension token is folded the same way, so a home cannot write one in a
+  # form that can never match.
+  home=$(make_home guard-spelling-token)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=vault-guard-denied] the vault guard refused a read"
+  status_append "$home" task-b "friction: [sig=vault-guard-denied] and refused another"
+  out=$(FM_FRICTION_GUARD_TOKENS='Vault_Guard' fr "$home" outcomes vault-guard-denied)
+  [ "$out" = "keep
+narrow" ] || fail "a configured guard token must match whatever its spelling, got: $out"
+  pass "guard classification is not evaded by a signature's spelling"
+}
+
+test_bearings_never_batches_a_guard_into_the_ranked_list() {
+  local home toon json
+  home=$(seed_guard_home guard-bearings)
+  toon=$(FM_HOME="$home" "$BEARINGS" 2>/dev/null) || fail "bearings failed on a seeded home"
+  json=$(FM_HOME="$home" "$BEARINGS" --json 2>/dev/null) || fail "bearings --json failed"
+
+  # bin/fm-friction.sh gives a guard its own section; the captain-facing
+  # projection must not put it back into one ranked, bounded list where ordinary
+  # friction can outrank and evict it.
+  printf '%s' "$json" | jq -e '
+    ([.friction[].sig] == ["issue-scope-understated"])
+    and ([.friction_guards[].sig] == ["secret-blocker-false-positive"])
+    and (.friction_guards[0].security == true)
+  ' >/dev/null || fail "a guard row must live in friction_guards, never in friction: $json"
+
+  # And the empty case renders rather than vanishing, for the same reason the
+  # counts do: absent is indistinguishable from not-computed.
+  home=$(make_home guard-bearings-empty)
+  toon=$(FM_HOME="$home" "$BEARINGS" 2>/dev/null) || fail "bearings failed on an empty home"
+  assert_contains "$toon" "friction_guards: []" \
+    "an empty guard list must still render as the empty-array form"
+  pass "bearings keeps guard signatures out of the ranked friction list"
+}
+
 # --- 5. triage lifecycle ----------------------------------------------------
 
 test_cancelled_draft_returns_to_surfaced() {
@@ -283,6 +393,35 @@ test_cancelled_draft_returns_to_surfaced() {
   [ "$(counts "$home")" = "1 0 0 0" ] \
     || fail "a cancelled signature must re-render as surfaced, got: $(counts "$home")"
   pass "a cancelled draft returns the signature to surfaced, not to dismissed"
+}
+
+test_cancel_without_a_pending_draft_is_refused() {
+  local home rc
+  home=$(make_home cancel-no-draft)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=agents-md-conflict] advice contradicts a hook"
+  status_append "$home" task-b "friction: [sig=agents-md-conflict] and again here"
+  fr "$home" draft agents-md-conflict --outcome keep >/dev/null
+  fr "$home" approve agents-md-conflict --issue https://example.invalid/issues/1 >/dev/null
+  [ "$(counts "$home")" = "0 0 0 1" ] \
+    || fail "the approved signature must be settled before the cancel, got: $(counts "$home")"
+
+  # Cancel rejects a draft's wording. A settled signature has no draft to
+  # reject, and reviving it would contradict "a kept signature keeps counting
+  # and never re-surfaces" while it still carries its outcome and filed issue.
+  set +e
+  fr "$home" cancel agents-md-conflict >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cancelling a signature with no pending draft must be refused"
+  [ "$(counts "$home")" = "0 0 0 1" ] \
+    || fail "a refused cancel must leave the signature settled, got: $(counts "$home")"
+  fr "$home" show agents-md-conflict | jq -e '
+    .state == "kept" and .surfaced == false and .outcome == "keep"
+    and .issue_url == "https://example.invalid/issues/1"
+  ' >/dev/null || fail "a refused cancel must leave the settled record intact"
+  pass "cancel requires a pending draft and never revives a settled signature"
 }
 
 test_settled_signature_keeps_counting_and_never_resurfaces() {
@@ -509,9 +648,14 @@ test_single_task_signature_is_recorded_not_surfaced
 test_counts_render_when_everything_is_zero
 test_bearings_always_carries_the_three_counts
 test_unattributable_record_surfaces_as_unclassified
+test_dot_leading_signature_is_unclassified_not_a_hidden_record
+test_corrupt_record_file_costs_only_its_own_row
 test_guard_signature_offers_no_removal_option
 test_guard_signature_surfaces_individually_with_its_caveat
+test_guard_classification_survives_the_slugs_spelling
+test_bearings_never_batches_a_guard_into_the_ranked_list
 test_cancelled_draft_returns_to_surfaced
+test_cancel_without_a_pending_draft_is_refused
 test_settled_signature_keeps_counting_and_never_resurfaces
 test_ingest_is_idempotent
 test_friction_is_transparent_to_state_readers
