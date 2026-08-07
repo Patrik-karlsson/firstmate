@@ -464,7 +464,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   # with ordinary friction would rank a containment guard by how often it
   # impeded work and let ordinary rows evict it from the default view, which is
   # the prioritised-list-of-security-controls failure the carve-out exists to
-  # prevent. Each array is bounded on its own so neither can crowd the other.
+  # prevent. The ranked list is bounded by FM_BEARINGS_FRICTION with an omitted[]
+  # row; the guard array is bounded by NOTHING, because a bound on it is a way to
+  # hide a containment guard - bin/fm-friction.sh exempts guards from its own
+  # record bound for the same reason. Do not add a cap here.
   # The unattributable aggregate carries security:false and stays with the
   # ordinary rows.
   | ([ $friction_rows[] | select(.security | not) ]) as $friction_all

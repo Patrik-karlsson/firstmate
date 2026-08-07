@@ -1161,6 +1161,84 @@ test_stored_signature_cannot_collide_with_a_legitimate_record() {
   pass "an illegal stored signature cannot overwrite a legitimate record"
 }
 
+test_retained_observations_follow_recency_not_task_id() {
+  local home r t id i json
+  home=$(make_home window-recency)
+  # Five rounds of two fresh tasks, each round folded at a later timestamp and
+  # then torn down. The window is smaller than the accumulated task count, so
+  # the record must keep the RECENT tasks' evidence - not whichever task ids
+  # happen to sort first, which is what a key-ordered grouping selects and which
+  # freezes permanently once the dead-task count reaches the window.
+  for r in 1 2 3 4 5; do
+    for t in a b; do
+      id="task-$r$t"
+      task_project "$home" "$id" lobbyn
+      for i in 1 2 3; do
+        status_append "$home" "$id" "friction: [sig=loud] round $r $t observation $i"
+      done
+    done
+    FM_TEST_NOW="2026-08-0${r}T10:00:00Z" FM_FRICTION_OBSERVATIONS=4 fr "$home" ingest \
+      || fail "ingest must succeed in round $r"
+    rm -f "$home"/state/task-*.status
+  done
+
+  # Round-robin still spreads one slot per task before any task gets a second,
+  # so a window of 4 lands on the four most-recently-active tasks - rounds 5 and
+  # 4, never rounds 1 and 2. Counts and the task list stay exact regardless.
+  json=$(FM_TEST_NOW=2026-08-05T10:00:00Z FM_FRICTION_OBSERVATIONS=4 fr "$home" show loud)
+  printf '%s' "$json" | jq -e '
+    .count == 30 and (.tasks | length) == 10
+    and (.observations | length) == 4
+    and ([.observations[].task] | unique)
+        == ["task-4a", "task-4b", "task-5a", "task-5b"]
+  ' >/dev/null || fail "the window must retain the most recent tasks: $(printf '%s' "$json" | jq -c '{count, tasks:(.tasks|length), obs_tasks:([.observations[].task]|unique)}')"
+
+  # The rendered `last:` is the reason this matters - it is what the captain
+  # reads as the signature's latest observation.
+  assert_contains "$(FM_TEST_NOW=2026-08-05T10:00:00Z FM_FRICTION_OBSERVATIONS=4 fr "$home" list)" \
+    "last: round 5" "the rendered last observation must be the most recent one"
+  pass "the retained observation window follows recency, not task id"
+}
+
+test_a_flag_without_a_value_says_so() {
+  local home rc out
+  home=$(make_home flag-value)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=slow-helper] took 40s"
+  status_append "$home" task-b "friction: [sig=slow-helper] took 41s"
+
+  # A trailing flag consumes the last argument, so the loop's own shift has
+  # nothing left and fails the script under set -eu before any validation runs.
+  # A triage command that exits with no output is the blind failure this script
+  # refuses everywhere else.
+  set +e
+  out=$(fr "$home" list --limit 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "list --limit with no value must fail"
+  assert_contains "$out" "--limit requires a value" "list --limit must say what is missing"
+
+  set +e
+  out=$(fr "$home" draft slow-helper --outcome 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "draft --outcome with no value must fail"
+  assert_contains "$out" "--outcome requires a value" "draft --outcome must say what is missing"
+
+  set +e
+  out=$(fr "$home" approve slow-helper --issue 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "approve --issue with no value must fail"
+  assert_contains "$out" "--issue requires a value" "approve --issue must say what is missing"
+
+  # And a value that is present but empty still reaches its own validation.
+  set +e
+  out=$(fr "$home" draft slow-helper --outcome= 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "draft --outcome= must still fail"
+  assert_contains "$out" "draft requires --outcome" "the empty-value spelling keeps its own message"
+  pass "a flag given without a value reports what is missing"
+}
+
 # --- 7. durability across teardown ------------------------------------------
 
 test_friction_survives_teardown() {
@@ -1282,6 +1360,8 @@ test_dismiss_refuses_a_settled_signature
 test_unclassified_aggregate_survives_the_record_cap
 test_unreadable_store_reports_unavailable_not_empty
 test_stored_signature_cannot_collide_with_a_legitimate_record
+test_retained_observations_follow_recency_not_task_id
+test_a_flag_without_a_value_says_so
 test_friction_survives_teardown
 test_ingest_leaves_a_frictionless_home_untouched
 

@@ -410,14 +410,27 @@ merged_model() {  # <now>
         | ($live_tasks | map({key: ., value: true}) | from_entries) as $is_live
         | ($obs | map(select($is_live[.task] // false))) as $live_obs
         | ($obs | map(select(($is_live[.task] // false) | not))) as $dead_obs
-        # Retain ROUND-ROBIN across tasks, newest first within each task. Taking
-        # the window off the tail of one flat sort concentrates the loss: every
-        # live event folded in one pass carries that pass single timestamp, so
-        # `.at` ties and the tie-break degrades to alphabetical-by-task, evicting
-        # whole tasks. A signature surfaces because INDEPENDENT tasks hit it, so
-        # a record that keeps no evidence from one of them cannot support the
-        # claim its own draft makes.
-        | ($dead_obs | group_by(.task) | map(sort_by([.at, .ordinal]) | reverse)) as $dead_by_task
+        # Retain ROUND-ROBIN across tasks, newest first within each task, and
+        # take the tasks themselves MOST-RECENTLY-ACTIVE first. Taking the window
+        # off the tail of one flat sort concentrates the loss: every live event
+        # folded in one pass carries that pass single timestamp, so `.at` ties
+        # and the tie-break degrades to alphabetical-by-task, evicting whole
+        # tasks. A signature surfaces because INDEPENDENT tasks hit it, so a
+        # record that keeps no evidence from one of them cannot support the claim
+        # its own draft makes.
+        #
+        # Ordering the GROUPS matters as much as ordering within them. group_by
+        # emits groups in key order, so leaving them that way decides survival by
+        # task-id collation - which tracks nothing this design ranks on, and is
+        # self-perpetuating once the dead-task count reaches the window: the same
+        # collation-first tasks win every fold and a newly affected task can
+        # never enter the record. Sorting the groups by their newest observation
+        # keeps the round-robin spread and makes the tasks that lose the tail
+        # slots the least recently active ones. Tasks torn down in the SAME fold
+        # share a timestamp, so their order is a genuine tie and falls back to
+        # collation, which is arbitrary but deterministic.
+        | ($dead_obs | group_by(.task) | map(sort_by([.at, .ordinal]) | reverse)
+           | sort_by(.[0].at) | reverse) as $dead_by_task
         | ([ range(0; ($dead_by_task | map(length) | max // 0)) as $i
              | $dead_by_task[] | .[$i] // empty ] | .[:$window]) as $dead_kept
         | ($dead_kept | map({key: obskey, value: true}) | from_entries) as $keep_set
@@ -726,7 +739,7 @@ case "$cmd" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --json) FORMAT=json ;;
-        --limit) shift; LIMIT=${1:-} ;;
+        --limit) shift; [ $# -gt 0 ] || die "--limit requires a value"; LIMIT=$1 ;;
         --limit=*) LIMIT=${1#--limit=} ;;
         *) usage >&2; exit 2 ;;
       esac
@@ -761,7 +774,7 @@ case "$cmd" in
     OUTCOME=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        --outcome) shift; OUTCOME=${1:-} ;;
+        --outcome) shift; [ $# -gt 0 ] || die "--outcome requires a value"; OUTCOME=$1 ;;
         --outcome=*) OUTCOME=${1#--outcome=} ;;
         *) usage >&2; exit 2 ;;
       esac
@@ -797,7 +810,7 @@ case "$cmd" in
     ISSUE=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        --issue) shift; ISSUE=${1:-} ;;
+        --issue) shift; [ $# -gt 0 ] || die "--issue requires a value"; ISSUE=$1 ;;
         --issue=*) ISSUE=${1#--issue=} ;;
         *) usage >&2; exit 2 ;;
       esac
