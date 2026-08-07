@@ -286,6 +286,15 @@ live_tasks_json() {
 # record must cost its own row and nothing else.
 stored_json() {
   local f out
+  # A store that EXISTS but cannot be enumerated is not an empty store. The glob
+  # yields nothing either way, and an empty result is a success, so without this
+  # the read reports zeroed counts and every surface says "nothing recorded"
+  # about records it simply could not see - the blind section the counts exist
+  # to prevent. A missing directory stays the legitimate empty case: a home that
+  # has never recorded friction must read as zero, not as unavailable.
+  if [ -e "$FRICTION_DIR" ]; then
+    { [ -d "$FRICTION_DIR" ] && [ -r "$FRICTION_DIR" ] && [ -x "$FRICTION_DIR" ]; } || return 1
+  fi
   set --
   for f in "$FRICTION_DIR"/*.json; do
     [ -e "$f" ] || continue
@@ -495,18 +504,23 @@ cap_model() {  # <model-json>
   # A glob screen, not a substitution: `${1//[[:space:]]/}` rebuilds the whole
   # model string per match, which is quadratic in a model that only grows.
   case "$1" in *[![:space:]]*) ;; *) return 1 ;; esac
-  printf '%s' "$1" | jq --argjson cap "$FM_FRICTION_RECORDS" '
+  printf '%s' "$1" | jq --argjson cap "$FM_FRICTION_RECORDS" --arg u "$UNCLASSIFIED" '
     if (type == "object" and has("counts")) then
       # THE bound. It is the only one in the mechanism that could ever drop a
-      # record, and it does not apply to a containment guard: guards come out
-      # first, whole, and are not ranked against ordinary friction for a slot.
-      # Every surface reads this list, so exempting them here is what makes
-      # "a guard is never hidden" true of all of them at once - a rule enforced
-      # per renderer is a rule that gets defeated by the next bound someone adds.
-      (.records | map(select(.security))) as $guards
-      | (.records | map(select(.security | not))) as $ordinary
+      # record, and two classes are exempt from it, listed here rather than
+      # re-stated per renderer - a rule enforced per surface is a rule the next
+      # bound someone adds will defeat again.
+      #   a containment guard, because a cap is otherwise a way to hide one; and
+      #   the unattributable aggregate, because its verbatim text is the ONLY
+      #   thing it carries - there is no signature to act on - so dropping the
+      #   row is dropping the finding, while its count keeps printing.
+      # Both come out whole and ahead of the ranked list, and neither competes
+      # with ordinary friction for a slot. It is at most one aggregate row, so
+      # the exemption adds no unbounded growth.
+      (.records | map(select(.security or .sig == $u))) as $exempt
+      | (.records | map(select((.security or .sig == $u) | not))) as $ordinary
       | .records_truncated = ([($ordinary | length) - $cap, 0] | max)
-      | .records = ($guards + ($ordinary[:$cap]))
+      | .records = ($exempt + ($ordinary[:$cap]))
     else error("friction model is not a readable record set") end'
 }
 

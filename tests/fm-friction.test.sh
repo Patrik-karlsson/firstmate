@@ -1055,6 +1055,81 @@ test_dismiss_refuses_a_settled_signature() {
   pass "dismiss refuses a settled signature and still refuses a guard"
 }
 
+test_unclassified_aggregate_survives_the_record_cap() {
+  local home json text i t
+  home=$(make_home unclassified-vs-cap)
+  for t in task-a task-b; do task_project "$home" "$t" lobbyn; done
+  # The aggregate is never surfaced, so it ranks behind every surfaced record
+  # and is the first thing a tight cap drops. Its verbatim text is the only
+  # thing it carries, so dropping the row drops the finding while the count
+  # keeps printing - a number with nothing behind it.
+  for i in $(seq 1 8); do
+    for t in task-a task-b; do
+      status_append "$home" "$t" "friction: [sig=ordinary-$i] noise"
+    done
+  done
+  for t in task-a task-b; do
+    status_append "$home" "$t" "friction: no signature token at all"
+  done
+
+  json=$(FM_FRICTION_RECORDS=4 fr "$home" list --json)
+  printf '%s' "$json" | jq -e '
+    .counts.unclassified == 2
+    and ([.records[] | select(.state == "unclassified") | .sig] | length) == 1
+    and .records_truncated > 0
+  ' >/dev/null || fail "the aggregate must survive a cap that truncates ordinary records: $(printf '%s' "$json" | jq -c '{counts, truncated:.records_truncated, agg:[.records[]|select(.state=="unclassified")|.sig]}')"
+
+  text=$(FM_FRICTION_RECORDS=4 fr "$home" list)
+  assert_contains "$text" "unclassified: 2 event(s)" \
+    "the text rendering must keep the unclassified section under a tight cap"
+  assert_contains "$text" "no signature token at all" \
+    "the verbatim text is the only thing the aggregate carries"
+
+  json=$(FM_HOME="$home" FM_FRICTION_RECORDS=4 "$BEARINGS" --json 2>/dev/null) \
+    || fail "bearings must render under a tight cap"
+  printf '%s' "$json" | jq -e '
+    ([.friction[] | select(.state == "unclassified")] | length) == 1
+  ' >/dev/null || fail "bearings must still carry the aggregate row: $(printf '%s' "$json" | jq -c '[.friction[].state]')"
+  pass "the unclassified aggregate survives the record cap on both surfaces"
+}
+
+test_unreadable_store_reports_unavailable_not_empty() {
+  local home json rc
+  home=$(make_home unreadable-store)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=real-sig] one"
+  status_append "$home" task-b "friction: [sig=real-sig] two"
+  fr "$home" ingest || fail "ingest must succeed before the store is made unreadable"
+  rm -f "$home"/state/task-a.status "$home"/state/task-b.status
+  [ "$(fr "$home" list --json | jq -r '.counts.surfaced')" = "1" ] \
+    || fail "the seeded store must read as one surfaced signature first"
+
+  # An existing store that cannot be enumerated must not read as a home that
+  # never recorded anything.
+  chmod 000 "$home/data/friction"
+  set +e
+  fr "$home" list --json >/dev/null 2>&1
+  rc=$?
+  set -e
+  chmod 755 "$home/data/friction"
+  [ "$rc" -ne 0 ] || fail "an unreadable store must not report success with zeroed counts"
+
+  # And the captain-facing surface must say so rather than showing a quiet zero.
+  chmod 000 "$home/data/friction"
+  json=$(FM_HOME="$home" "$BEARINGS" --json 2>/dev/null)
+  chmod 755 "$home/data/friction"
+  printf '%s' "$json" | jq -e '
+    [.omitted[] | select(.surface | test("friction records unavailable"))] | length == 1
+  ' >/dev/null || fail "bearings must disclose an unreadable friction store: $(printf '%s' "$json" | jq -c '[.omitted[].surface]')"
+
+  # A home that never recorded friction stays the legitimate empty case.
+  home=$(make_home never-recorded)
+  fr "$home" list --json | jq -e '.counts.surfaced == 0' >/dev/null \
+    || fail "a home with no friction store must still read as an honest zero"
+  pass "an unreadable store reports unavailable rather than empty"
+}
+
 # --- 7. durability across teardown ------------------------------------------
 
 test_friction_survives_teardown() {
@@ -1173,6 +1248,8 @@ test_unclassified_aggregate_survives_the_signature_screen
 test_an_unusual_but_legal_signature_survives_teardown
 test_signature_grammar_agrees_across_its_consumers
 test_dismiss_refuses_a_settled_signature
+test_unclassified_aggregate_survives_the_record_cap
+test_unreadable_store_reports_unavailable_not_empty
 test_friction_survives_teardown
 test_ingest_leaves_a_frictionless_home_untouched
 
