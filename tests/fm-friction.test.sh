@@ -962,6 +962,99 @@ test_unclassified_aggregate_survives_the_signature_screen() {
   pass "the unclassified aggregate survives the stored-signature screen"
 }
 
+test_an_unusual_but_legal_signature_survives_teardown() {
+  local home json
+  home=$(make_home unusual-slug)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  # `_` and `-` lead a legal slug: the parser accepts it and record_path writes
+  # it, so a reader that accepts less turns the record into a write-only file
+  # that disappears exactly when teardown makes the store the only source.
+  status_append "$home" task-a "friction: [sig=_internal-helper-refuses] helper refused"
+  status_append "$home" task-b "friction: [sig=_internal-helper-refuses] refused again"
+  status_append "$home" task-a "friction: [sig=-dash-lead-sig] another one"
+  status_append "$home" task-b "friction: [sig=-dash-lead-sig] and again"
+  fr "$home" ingest || fail "ingest must accept a legal leading-underscore signature"
+
+  rm -f "$home"/state/task-a.status "$home"/state/task-b.status
+  json=$(fr "$home" list --json)
+  printf '%s' "$json" | jq -e '
+    .counts.surfaced == 2
+    and ([.records[].sig] | index("_internal-helper-refuses")) != null
+    and ([.records[].sig] | index("-dash-lead-sig")) != null
+  ' >/dev/null || fail "a legal signature must survive teardown: $(printf '%s' "$json" | jq -c '{counts, sigs:[.records[].sig]}')"
+  fr "$home" show _internal-helper-refuses | jq -e '.count == 2 and (.tasks | length) == 2' \
+    >/dev/null || fail "the surviving record must still be readable by signature"
+  pass "a legal but unusual signature survives teardown on every surface"
+}
+
+test_signature_grammar_agrees_across_its_consumers() {
+  local sig home accepted stored
+  # The grammar is applied by the parser, by the writer that turns a signature
+  # into a filename, and by the reader that screens stored records. They are
+  # three consumers of ONE rule, so drift between them is the defect class this
+  # pins: anything the parser accepts must round-trip through write and read.
+  for sig in _leading -leading a.b_c ok-sig UPPER.Case_9 x; do
+    home=$(make_home "grammar-$(printf '%s' "$sig" | tr -c 'A-Za-z0-9' '-')")
+    task_project "$home" task-a lobbyn
+    task_project "$home" task-b lobbyn
+    status_append "$home" task-a "friction: [sig=$sig] first"
+    status_append "$home" task-b "friction: [sig=$sig] second"
+    accepted=$(fr "$home" list --json | jq -r --arg s "$sig" '[.records[].sig] | index($s) | tostring')
+    [ "$accepted" != "null" ] || fail "the parser must accept the legal signature $sig"
+    fr "$home" ingest || fail "the writer must accept the legal signature $sig"
+    rm -f "$home"/state/task-a.status "$home"/state/task-b.status
+    stored=$(fr "$home" list --json | jq -r --arg s "$sig" '[.records[].sig] | index($s) | tostring')
+    [ "$stored" != "null" ] \
+      || fail "the stored-record screen rejected $sig, which the parser and writer both accept"
+  done
+  # And the direction that must stay rejected everywhere: a leading dot would
+  # write a dotfile the reading glob never matches again.
+  home=$(make_home grammar-rejected)
+  task_project "$home" task-a lobbyn
+  status_append "$home" task-a "friction: [sig=.hidden-sig] should not classify"
+  fr "$home" list --json | jq -e '
+    ([.records[].sig] | index(".hidden-sig")) == null and .counts.unclassified == 1
+  ' >/dev/null || fail ".hidden-sig must degrade to unclassified, not become a signature"
+  pass "the signature grammar agrees across parser, writer and stored-record screen"
+}
+
+test_dismiss_refuses_a_settled_signature() {
+  local home rc
+  home=$(make_home dismiss-settled)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=slow-helper] took 40s"
+  status_append "$home" task-b "friction: [sig=slow-helper] took 41s"
+  fr "$home" draft slow-helper --outcome keep >/dev/null
+  fr "$home" approve slow-helper --issue https://example.invalid/1 >/dev/null
+
+  # dismiss means "not a real pattern". Applying it to a kept signature would
+  # leave the record asserting that AND carrying the filed issue that says the
+  # friction is intentional and stays.
+  set +e
+  fr "$home" dismiss slow-helper >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "dismissing an already-settled signature must be refused"
+  fr "$home" show slow-helper | jq -e '
+    .state == "kept" and .outcome == "keep" and .issue_url == "https://example.invalid/1"
+  ' >/dev/null || fail "a refused dismiss must leave the settled record intact"
+
+  # The guard refusal must still hold independently.
+  home=$(make_home dismiss-guard)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=secret-blocker-fp] denied a docs path"
+  status_append "$home" task-b "friction: [sig=secret-blocker-fp] denied a fixtures path"
+  set +e
+  fr "$home" dismiss secret-blocker-fp >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "dismissing a guard signature must still be refused"
+  pass "dismiss refuses a settled signature and still refuses a guard"
+}
+
 # --- 7. durability across teardown ------------------------------------------
 
 test_friction_survives_teardown() {
@@ -1077,6 +1170,9 @@ test_draft_survives_a_very_chatty_signature
 test_a_guard_signature_survives_the_record_cap
 test_illegal_stored_signature_costs_only_its_own_row
 test_unclassified_aggregate_survives_the_signature_screen
+test_an_unusual_but_legal_signature_survives_teardown
+test_signature_grammar_agrees_across_its_consumers
+test_dismiss_refuses_a_settled_signature
 test_friction_survives_teardown
 test_ingest_leaves_a_frictionless_home_untouched
 

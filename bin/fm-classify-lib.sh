@@ -756,6 +756,25 @@ _fm_friction_flatten() {  # <text>
   printf '%s' "$_FM_FRICTION_FLAT"
 }
 
+# THE signature grammar, in one place, because it is applied by three different
+# consumers in two different languages: the parser below, bin/fm-friction.sh's
+# record_path (which turns a signature into a filename), and that script's
+# stored-record screen (jq). A signature legal to parse but rejected by one of
+# the others becomes a record that is written and then unreadable, which is the
+# silent loss the unclassified sentinel exists to prevent - so the rule cannot
+# be hand-copied per consumer. The regex below is the ERE encoding of the same
+# accept set as the shell pattern: non-empty, every character in the class, and
+# a first character that is not `.` (a leading dot would make the record a
+# dotfile the reading glob never matches).
+# shellcheck disable=SC2034 # Read by bin/fm-friction.sh's stored-record screen, not this lib.
+FM_CLASSIFY_FRICTION_SIG_RE='^[A-Za-z0-9_-][A-Za-z0-9._-]*$'
+
+friction_sig_is_legal() {  # <sig>
+  case "$1" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
 _fm_status_line_friction_sig() {  # <status-line> -> sets _FM_FRICTION_SIG; 1 when absent/malformed
   local k
   _fm_status_line_note "$1"
@@ -765,9 +784,7 @@ _fm_status_line_friction_sig() {  # <status-line> -> sets _FM_FRICTION_SIG; 1 wh
   esac
   k=${_FM_STATUS_LINE_NOTE#\[sig=}
   k=${k%%\]*}
-  case "$k" in
-    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
-  esac
+  friction_sig_is_legal "$k" || return 1
   _FM_FRICTION_SIG=$k
 }
 status_line_friction_sig() {  # <status-line> -> sig slug; 1 when absent/malformed

@@ -203,9 +203,7 @@ record_path() {  # <sig>
     printf '%s/@unclassified.json' "$FRICTION_DIR"
     return 0
   fi
-  case "$sig" in
-    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
-  esac
+  friction_sig_is_legal "$sig" || return 1
   printf '%s/%s.json' "$FRICTION_DIR" "$sig"
 }
 
@@ -299,18 +297,18 @@ stored_json() {
   # refusal, so a single hand-edited record with a renamed signature would stop
   # the ONLY writer and take every neighbouring record's triage down with it.
   # Screening here degrades it to its own row, like an unparseable file.
-  if out=$(jq -s -c --arg u "$UNCLASSIFIED" \
+  if out=$(jq -s -c --arg u "$UNCLASSIFIED" --arg re "$FM_CLASSIFY_FRICTION_SIG_RE" \
         '[ .[] | select(type == "object" and (.sig | type) == "string")
-                | select(.sig == $u or (.sig | test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))) ]' \
+                | select(.sig == $u or (.sig | test($re))) ]' \
         "$@" 2>/dev/null); then
     printf '%s' "$out"
     return 0
   fi
   {
     for f in "$@"; do
-      jq -c --arg u "$UNCLASSIFIED" \
+      jq -c --arg u "$UNCLASSIFIED" --arg re "$FM_CLASSIFY_FRICTION_SIG_RE" \
         'select(type == "object" and (.sig | type) == "string")
-         | select(.sig == $u or (.sig | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")))' \
+         | select(.sig == $u or (.sig | test($re)))' \
         "$f" 2>/dev/null || true
     done
   } | jq -s '.'
@@ -828,6 +826,12 @@ case "$cmd" in
   dismiss)
     SIG=${1:-}; require_sig "$SIG"
     REC=$(read_record "$SIG")
+    # The same gate draft carries. Dismissing an already-settled signature would
+    # stamp it "not a real pattern" while it still holds the outcome and the URL
+    # of a filed issue saying the opposite - a record the captain reads before
+    # ruling on that signature again.
+    printf '%s' "$REC" | jq -e '.eligible' >/dev/null \
+      || die "$SIG is already settled ($(printf '%s' "$REC" | jq -r '.state')); a settled signature keeps counting and never re-enters triage"
     printf '%s' "$REC" | jq -e '.security | not' >/dev/null \
       || die "$SIG names a containment guard; silent dismissal is not an outcome (available: $(printf '%s' "$REC" | jq -r '.outcomes | join(", ")'))"
     update_record "$SIG" '.draft = null | .state = "dismissed"'
