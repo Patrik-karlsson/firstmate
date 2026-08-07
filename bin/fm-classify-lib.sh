@@ -737,12 +737,18 @@ FM_CLASSIFY_FRICTION_TEXT_MAX_DEFAULT=200
 # path, so a $(...) per parser is four forks per accumulated line. The setters
 # use distinct globals so a caller can hold a signature while resolving a text.
 _fm_friction_flatten_var() {  # <text> -> sets _FM_FRICTION_FLAT
-  local t=${1//$'\t'/ } max
+  # Trim, BOUND, then flatten. The tab substitution rebuilds the string per
+  # match, so running it on the raw line makes a pathological append cost
+  # seconds on every read rather than being bounded by the very limit below.
+  # Order is safe because the trims are anchored strips that already treat tab
+  # as whitespace, and tab-to-space is length-preserving, so bounding first
+  # yields the same bytes.
+  local t=$1 max
   t=${t#"${t%%[![:space:]]*}"}
   t=${t%"${t##*[![:space:]]}"}
   max=${FM_CLASSIFY_FRICTION_TEXT_MAX:-$FM_CLASSIFY_FRICTION_TEXT_MAX_DEFAULT}
   case "$max" in ''|*[!0-9]*|0) max=$FM_CLASSIFY_FRICTION_TEXT_MAX_DEFAULT ;; esac
-  [ "${#t}" -le "$max" ] || t="${t:0:$max}..."
+  if [ "${#t}" -le "$max" ]; then t=${t//$'\t'/ }; else t="${t:0:$max}"; t="${t//$'\t'/ }..."; fi
   _FM_FRICTION_FLAT=$t
 }
 _fm_friction_flatten() {  # <text>

@@ -886,6 +886,82 @@ test_draft_survives_a_very_chatty_signature() {
   pass "a very chatty signature can still be drafted and the draft round-trips"
 }
 
+test_a_guard_signature_survives_the_record_cap() {
+  local home text json i t
+  home=$(make_home guard-vs-cap)
+  for t in task-a task-b task-c; do task_project "$home" "$t" lobbyn; done
+  # Ordinary signatures outrank the guard on task count, so under one flat
+  # ranked cap the guard is the row that falls off. A cap is not allowed to be
+  # a way to hide a containment guard.
+  for i in $(seq 1 8); do
+    for t in task-a task-b task-c; do
+      status_append "$home" "$t" "friction: [sig=ordinary-$i] noise"
+    done
+  done
+  status_append "$home" task-a "friction: [sig=secret-blocker-fp] guard denied a docs path class"
+  status_append "$home" task-b "friction: [sig=secret-blocker-fp] guard denied a fixtures path class"
+
+  text=$(FM_FRICTION_RECORDS=4 fr "$home" list)
+  assert_contains "$text" "security guards - never batched" \
+    "a guard must keep its own section however tight the record cap is"
+  assert_contains "$text" "secret-blocker-fp" "the guard signature must be named under the cap"
+  json=$(FM_FRICTION_RECORDS=4 fr "$home" list --json)
+  printf '%s' "$json" | jq -e '
+    ([.records[] | select(.security) | .sig] == ["secret-blocker-fp"])
+    and .records_truncated > 0
+  ' >/dev/null || fail "the guard must survive a cap that truncates ordinary records: $(printf '%s' "$json" | jq -c '{records_truncated, guards:[.records[]|select(.security)|.sig]}')"
+
+  # And the same through the captain-facing projection, including its own bound.
+  json=$(FM_HOME="$home" FM_FRICTION_RECORDS=4 FM_BEARINGS_FRICTION=2 "$BEARINGS" --json 2>/dev/null) \
+    || fail "bearings must render with a tight cap"
+  printf '%s' "$json" | jq -e '
+    ([.friction_guards[].sig] == ["secret-blocker-fp"])
+  ' >/dev/null || fail "bearings must still show the guard under both bounds: $(printf '%s' "$json" | jq -c '{friction_guards, friction:(.friction|length)}')"
+  pass "a guard signature survives every record bound on both surfaces"
+}
+
+test_illegal_stored_signature_costs_only_its_own_row() {
+  local home
+  home=$(make_home illegal-sig)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=good-sig] one"
+  status_append "$home" task-b "friction: [sig=good-sig] two"
+  fr "$home" ingest || fail "ingest must succeed before seeding an illegal record"
+  # write_record refuses an illegal slug and ingest propagates that refusal, so
+  # an unscreened record here would stop the ONLY writer for every signature.
+  jq -n '{sig:"../../escaped",first_seen:"2026-01-01T00:00:00Z",last_seen:"2026-01-01T00:00:00Z",
+          count:1,tasks:["task-a"],dropped_counts:{},projects:[],observations:[],
+          state:"new",security:false,outcome:null,issue_url:null,draft:null}' \
+    > "$home/data/friction/escaped.json"
+
+  fr "$home" ingest || fail "an illegal stored signature must not stop the only writer"
+  fr "$home" draft good-sig --outcome clear >/dev/null \
+    || fail "a neighbouring signature must stay triageable"
+  fr "$home" list --json | jq -e '
+    ([.records[].sig] | index("../../escaped")) == null
+    and ([.records[].sig] | index("good-sig")) != null
+  ' >/dev/null || fail "the illegal record must degrade to its own row"
+  assert_present "$home/data/friction/escaped.json" \
+    "the offending file must be left in place for inspection rather than deleted"
+  pass "an illegal stored signature costs its own row and never stops the writer"
+}
+
+test_unclassified_aggregate_survives_the_signature_screen() {
+  local home
+  home=$(make_home unclassified-screen)
+  task_project "$home" task-a lobbyn
+  status_append "$home" task-a "friction: no signature token at all"
+  fr "$home" ingest || fail "ingest must record the unattributable line"
+  # The aggregate is stored under a sentinel that is deliberately NOT a legal
+  # slug, so a signature screen must special-case it or the unclassified count
+  # silently drops to zero once the reporting log is gone.
+  rm -f "$home"/state/task-a.status
+  fr "$home" list --json | jq -e '.counts.unclassified == 1' >/dev/null \
+    || fail "the unclassified aggregate must survive teardown: $(fr "$home" list --json | jq -c .counts)"
+  pass "the unclassified aggregate survives the stored-signature screen"
+}
+
 # --- 7. durability across teardown ------------------------------------------
 
 test_friction_survives_teardown() {
@@ -998,6 +1074,9 @@ test_outcomes_propagates_a_read_failure
 test_eviction_keeps_evidence_from_every_task
 test_unclassified_section_discloses_its_window
 test_draft_survives_a_very_chatty_signature
+test_a_guard_signature_survives_the_record_cap
+test_illegal_stored_signature_costs_only_its_own_row
+test_unclassified_aggregate_survives_the_signature_screen
 test_friction_survives_teardown
 test_ingest_leaves_a_frictionless_home_untouched
 

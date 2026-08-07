@@ -69,8 +69,10 @@
 # friction_guards[] holds every signature naming a containment guard. A guard is
 # never batched with ordinary friction, here or in bin/fm-friction.sh's own
 # rendering, because this mechanism ranks by how often something impeded work -
-# the right signal for a broken helper and the wrong one for a guard. Each array
-# is bounded independently by FM_BEARINGS_FRICTION with its own omitted[] row.
+# the right signal for a broken helper and the wrong one for a guard. friction[]
+# is bounded by FM_BEARINGS_FRICTION with an omitted[] row; friction_guards[] is
+# deliberately UNBOUNDED, because a bound on it is a way to hide a containment
+# guard and bin/fm-friction.sh already exempts guards from its own record cap.
 #
 # Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
 set -u
@@ -486,7 +488,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       friction_unclassified: ($friction.counts.unclassified // 0),
       friction_settled: ($friction.counts.settled // 0),
       friction: (if $all_friction == 1 then $friction_all else $friction_all[:$friction_n] end),
-      friction_guards: (if $all_friction == 1 then $friction_guards_all else $friction_guards_all[:$friction_n] end)
+      friction_guards: $friction_guards_all
     }
   | . + (if ($unhealthy_all | length) > 0 then
            {unhealthy_endpoints:(if $all_unhealthy == 1 then $unhealthy_all else $unhealthy_all[:$unhealthy_n] end)}
@@ -527,7 +529,6 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $include_prs == 1 and $pr_repos_total > $pr_repos_shown then {surface:("PR repositories showing \($pr_repos_shown) of \($pr_repos_total)"), reveal:"--all-pr-repos"} else empty end),
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
         (if $all_friction == 0 and ($friction_all | length) > $friction_n then {surface:("friction showing \($friction_n) of \($friction_all | length)"), reveal:"--all-friction"} else empty end),
-        (if $all_friction == 0 and ($friction_guards_all | length) > $friction_n then {surface:("friction_guards showing \($friction_n) of \($friction_guards_all | length)"), reveal:"--all-friction"} else empty end),
         (($friction.records_truncated // 0) as $n | if $n > 0 then {surface:("friction records omitted by the record bound: \($n)"), reveal:"raise FM_FRICTION_RECORDS"} else empty end),
         (([($friction.records // [])[] | select(.surfaced == true or .state == "unclassified") | select((.observations_dropped // 0) > 0)] | length) as $n
          | if $n > 0 then {surface:("friction observations elided by the retained window for \($n) signature(s); counts and task lists stay exact"), reveal:"bin/fm-friction.sh show <sig>"} else empty end),

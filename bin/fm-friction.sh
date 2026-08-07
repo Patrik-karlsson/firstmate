@@ -95,6 +95,12 @@
 # catching very little. Without the carve-out its natural output is a
 # prioritised list of security controls to remove.
 #
+# A guard signature is also exempt from the record bound, so no cap can hide
+# one. That exemption lives at the single bound in cap_model rather than in each
+# renderer, because the carve-out has twice been defeated by a mechanism that
+# knew nothing about it - first display batching, then the record cap - and a
+# rule restated per surface is a rule the next bound will defeat again.
+#
 # A signature is security-classified when any of these tokens appears as a whole
 # segment run in its slug:
 #   secret credential security merge-into-main branch-protection push-protection
@@ -128,8 +134,11 @@
 #
 # Environment:
 #   FM_FRICTION_THRESHOLD      distinct tasks required to surface (default 2)
-#   FM_FRICTION_RECORDS        max records in the rendered model (default 50);
-#                              the COUNTS are always computed over every record
+#   FM_FRICTION_RECORDS        max ORDINARY records in the rendered model
+#                              (default 50); guard signatures are exempt and the
+#                              COUNTS are always computed over every record, so
+#                              records_truncated counts omitted ordinary records
+#                              while records_total counts every record there is
 #   FM_FRICTION_OBSERVATIONS   observation texts retained per record (default
 #                              20); count, tasks and first/last_seen stay exact
 #   FM_FRICTION_GUARD_TOKENS   extra security-guard tokens, space-separated
@@ -285,13 +294,24 @@ stored_json() {
     set -- "$@" "$f"
   done
   [ "$#" -gt 0 ] || { printf '[]'; return 0; }
-  if out=$(jq -s -c '[ .[] | select(type == "object" and (.sig | type) == "string") ]' "$@" 2>/dev/null); then
+  # The signature must be one record_path would accept, or the unclassified
+  # sentinel. write_record refuses an illegal slug and ingest propagates that
+  # refusal, so a single hand-edited record with a renamed signature would stop
+  # the ONLY writer and take every neighbouring record's triage down with it.
+  # Screening here degrades it to its own row, like an unparseable file.
+  if out=$(jq -s -c --arg u "$UNCLASSIFIED" \
+        '[ .[] | select(type == "object" and (.sig | type) == "string")
+                | select(.sig == $u or (.sig | test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))) ]' \
+        "$@" 2>/dev/null); then
     printf '%s' "$out"
     return 0
   fi
   {
     for f in "$@"; do
-      jq -c 'select(type == "object" and (.sig | type) == "string")' "$f" 2>/dev/null || true
+      jq -c --arg u "$UNCLASSIFIED" \
+        'select(type == "object" and (.sig | type) == "string")
+         | select(.sig == $u or (.sig | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")))' \
+        "$f" 2>/dev/null || true
     done
   } | jq -s '.'
 }
@@ -474,11 +494,21 @@ merged_model() {  # <now>
 # a failed read upstream, and letting that through would print a section with no
 # counts at all - the blind section the counts exist to prevent.
 cap_model() {  # <model-json>
-  [ -n "${1//[[:space:]]/}" ] || return 1
+  # A glob screen, not a substitution: `${1//[[:space:]]/}` rebuilds the whole
+  # model string per match, which is quadratic in a model that only grows.
+  case "$1" in *[![:space:]]*) ;; *) return 1 ;; esac
   printf '%s' "$1" | jq --argjson cap "$FM_FRICTION_RECORDS" '
     if (type == "object" and has("counts")) then
-      .records_truncated = ([(.records | length) - $cap, 0] | max)
-      | .records |= .[:$cap]
+      # THE bound. It is the only one in the mechanism that could ever drop a
+      # record, and it does not apply to a containment guard: guards come out
+      # first, whole, and are not ranked against ordinary friction for a slot.
+      # Every surface reads this list, so exempting them here is what makes
+      # "a guard is never hidden" true of all of them at once - a rule enforced
+      # per renderer is a rule that gets defeated by the next bound someone adds.
+      (.records | map(select(.security))) as $guards
+      | (.records | map(select(.security | not))) as $ordinary
+      | .records_truncated = ([($ordinary | length) - $cap, 0] | max)
+      | .records = ($guards + ($ordinary[:$cap]))
     else error("friction model is not a readable record set") end'
 }
 
@@ -561,7 +591,7 @@ update_record() {  # <sig> <jq-expr> [--arg name value]...
 # --- rendering --------------------------------------------------------------
 
 render_text() {  # <model-json>
-  [ -n "${1//[[:space:]]/}" ] || die "could not read friction records"
+  case "$1" in *[![:space:]]*) ;; *) die "could not read friction records" ;; esac
   printf '%s' "$1" | jq -r --arg u "$UNCLASSIFIED" '
     "FRICTION (threshold: \(.threshold) distinct tasks)",
     "counts: surfaced=\(.counts.surfaced) suppressed=\(.counts.suppressed) unclassified=\(.counts.unclassified) settled=\(.counts.settled)",
@@ -570,7 +600,7 @@ render_text() {  # <model-json>
      | if ($s | length) == 0 then "surfaced patterns: none"
        else ("surfaced patterns:",
              ($s[] | "  \(.sig)  tasks=\(.tasks | length) count=\(.count)  outcomes: \(.outcomes | join(", "))",
-                     "    last: \(.observations | last | .text)"))
+                     "    last: \((.observations | last | .text) // "-")"))
        end),
     # A guard signature is rendered in its OWN section rather than beside the
     # ordinary patterns. Batching it into a ranked list is what turns this
@@ -580,7 +610,7 @@ render_text() {  # <model-json>
      | if ($g | length) == 0 then empty
        else ("", "security guards - never batched, each is its own decision:",
              ($g[] | "  \(.sig)  tasks=\(.tasks | length) observed-false-positives=\(.count)  outcomes: \(.outcomes | join(", "))",
-                     "    last: \(.observations | last | .text)"),
+                     "    last: \((.observations | last | .text) // "-")"),
              "  frequency is not evidence a guard is wrong")
        end),
     (([.records[] | select(.sig == $u)]) as $u2
