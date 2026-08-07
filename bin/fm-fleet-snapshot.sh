@@ -33,6 +33,15 @@
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
+#   friction: the `fm-friction.v1` model plus `available` - counts
+#     {surfaced,suppressed,unclassified,settled}, records[], records_total, and
+#     records_truncated for this home's durable friction records. Read through
+#     bin/fm-friction.sh without ingesting, so this snapshot stays a pure read;
+#     that script owns the record shape, the recurrence threshold, the count
+#     definitions, and the security-guard carve-out. A store that cannot be read
+#     reports available:false with a reason and zeroed counts rather than an
+#     empty section, so a renderer can still tell "nothing recorded" from "could
+#     not be read".
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
 #     (orphan structured in-flight ids with no state/<id>.meta, and unstructured

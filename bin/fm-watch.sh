@@ -13,7 +13,17 @@
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#                          is not provably working, unless afk is active.
+#                          Outside afk, a record set whose every file is a status
+#                          log that grew ONLY by non-blocking friction lines is
+#                          absorbed BEFORE that verb test, so appending friction
+#                          never wakes firstmate even when an older
+#                          captain-relevant line is still in the file; that older
+#                          line stays eligible for the heartbeat backstop because
+#                          this absorb deliberately does not mark it surfaced.
+#                          It fails closed to the normal rules on a mixed delta,
+#                          a first sighting with no recorded size, a file that
+#                          did not grow, or an unreadable read.
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
