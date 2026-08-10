@@ -779,8 +779,88 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# A single execve argument is capped at MAX_ARG_STRLEN (128 KiB on Linux),
+# independently of ARG_MAX, so every projected model the snapshot assembles must
+# reach jq by a route that is not argv.
+# The fixture below deliberately drives both the backlog and the task projection
+# past that cap, and the test asserts that size before asserting success, so a
+# later shrink of either projection cannot leave the case quietly vacuous.
+MAX_ARG_STRLEN=131072
+
+write_oversized_fixture() {  # <home>
+  local home=$1 i id pad note
+  pad=$(printf '%0900d' 0)
+  note=$(printf '%0400d' 0)
+  {
+    printf '## In flight\n'
+    for i in $(seq -w 1 40); do
+      printf -- '- [ ] ship-%s - Ship %s (repo: alpha) (kind: ship) (since 2026-07-07)\n' "$i" "$i"
+      printf '  %s\n' "$pad"
+    done
+    printf '\n## Done\n'
+    for i in $(seq -w 1 12); do
+      printf -- '- [x] done-%s - Done %s https://github.com/o/r/pull/%s (repo: alpha) (kind: ship) (merged 2026-07-06)\n' "$i" "$i" "$i"
+      for _ in $(seq 1 12); do printf '  %s\n' "$note"; done
+    done
+  } > "$home/data/backlog.md"
+  for i in $(seq -w 1 40); do
+    id=ship-$i
+    mkdir -p "$home/projects/$id"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" \
+      "worktree=$home/projects/$id" \
+      "project=alpha" \
+      "harness=claude" \
+      "kind=ship" \
+      "mode=ship" \
+      "yolo=off"
+    printf 'working: %s\n' "$pad" > "$home/state/$id.status"
+  done
+}
+
+test_oversized_projections_do_not_exceed_argv_limit() {
+  local home out summary backlog_bytes tasks_bytes
+  home=$(make_home oversized)
+  write_oversized_fixture "$home"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must succeed when its projections exceed the argv limit"
+  printf '%s' "$out" | jq -e . >/dev/null || fail "oversized snapshot must be valid JSON"
+
+  backlog_bytes=$(printf '%s' "$out" | jq '.backlog | tojson | length')
+  tasks_bytes=$(printf '%s' "$out" | jq '.tasks | tojson | length')
+  [ "$backlog_bytes" -gt "$MAX_ARG_STRLEN" ] \
+    || fail "fixture backlog projection is only $backlog_bytes bytes; it must exceed $MAX_ARG_STRLEN to exercise the defect"
+  [ "$tasks_bytes" -gt "$MAX_ARG_STRLEN" ] \
+    || fail "fixture task projection is only $tasks_bytes bytes; it must exceed $MAX_ARG_STRLEN to exercise the defect"
+
+  printf '%s' "$out" | jq -e '
+    (.backlog.records | length) == 52
+      and (.tasks | length) == 40
+      and .main_inventory.valid == true
+      and (.secondmate_current.records | length) == 0
+  ' >/dev/null || fail "oversized snapshot lost records or inventory disclosure: $(printf '%s' "$out" | jq -c '.main_inventory')"
+
+  summary=$(FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "home summary must succeed when its projections exceed the argv limit"
+  # The fixture has no live backend, so its children read as unknown and the
+  # summary is correctly invalid; what this asserts is that the whole oversized
+  # backlog and task projection still reached the summary intact.
+  printf '%s' "$summary" | jq -e '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .invalidity.kind == "child_current_unavailable"
+      and (.invalidity.ids | length) == 40
+      and .counts.landed == 12
+  ' >/dev/null || fail "oversized home summary wrong: $(printf '%s' "$summary" | jq -c '{valid,invalidity:.invalidity.kind,counts}')"
+
+  FM_HOME="$home" "$ROOT/bin/fm-bearings-snapshot.sh" >/dev/null \
+    || fail "bearings must render against an oversized projection"
+  pass "oversized backlog and task projections still assemble a snapshot, home summary, and bearings"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_oversized_projections_do_not_exceed_argv_limit
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
