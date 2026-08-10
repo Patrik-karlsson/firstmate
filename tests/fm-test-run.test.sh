@@ -396,53 +396,48 @@ test_portable_shard_union_and_coverage_guard() {
 #
 # Collation is a platform property, not just a locale-name property: glibc
 # ignores punctuation at the primary level, while stock BSD/macOS sort does not,
-# so a diverging locale may not exist at all there. The guard must therefore
-# hold under whatever UTF-8 locale is available on every platform, and the
-# divergence case is asserted as an ADDITIONAL requirement wherever one exists
-# rather than being demanded everywhere.
+# so a diverging locale may not exist at all there. Only a diverging locale
+# reproduces the defect, so where none exists this reports an explicit skip
+# rather than exercising the guard under a locale that cannot reproduce it: a
+# pass there would claim coverage it did not provide. The ambient-locale case
+# stays covered by test_portable_shard_union_and_coverage_guard, which runs
+# --check-coverage with no LC_ALL pin.
 test_coverage_guard_survives_a_dictionary_collation_locale() {
-  local loc probe_c probe_l diverging="" first="" target out err status tmp
+  local loc probe_c probe_l diverging="" first="" out err status tmp
   probe_c=$(printf 'fm-x.test.sh\nfm-x-y.test.sh\n' | LC_ALL=C sort)
   while read -r loc; do
     [ -n "$loc" ] || continue
     probe_l=$(printf 'fm-x.test.sh\nfm-x-y.test.sh\n' | LC_ALL="$loc" sort 2>/dev/null)
     [ -n "$probe_l" ] || continue
     [ -n "$first" ] || first=$loc
-    if [ -z "$diverging" ] && [ "$probe_l" != "$probe_c" ]; then
+    if [ "$probe_l" != "$probe_c" ]; then
       diverging=$loc
+      break
     fi
   done < <(locale -a 2>/dev/null | grep -iE 'utf-?8')
 
   [ -n "$first" ] \
-    || fail "no usable UTF-8 locale on this system; the coverage guard's locale contract cannot be exercised here"
+    || { pass "coverage guard locale contract skipped: no usable UTF-8 locale on this system"; return; }
+  [ -n "$diverging" ] \
+    || { pass "coverage guard locale contract skipped: no diverging-collation UTF-8 locale on this system"; return; }
 
-  # Prefer a locale that actually reorders the C-sorted lists, because only that
-  # one reproduces the original defect; fall back to any UTF-8 locale so the
-  # guard is still exercised on platforms whose collation never diverges.
-  target=${diverging:-$first}
-  if [ -n "$diverging" ]; then
-    # Assert the divergence itself, so this case cannot go quietly vacuous.
-    [ "$(printf 'fm-x.test.sh\nfm-x-y.test.sh\n' | LC_ALL="$diverging" sort)" != "$probe_c" ] \
-      || fail "locale $diverging was selected as diverging but collates like C"
-  fi
+  # Assert the divergence itself, so this case cannot go quietly vacuous.
+  [ "$(printf 'fm-x.test.sh\nfm-x-y.test.sh\n' | LC_ALL="$diverging" sort)" != "$probe_c" ] \
+    || fail "locale $diverging was selected as diverging but collates like C"
 
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-locale.XXXXXX")
   status=0
-  out=$(LC_ALL="$target" "$RUNNER" --check-coverage 2>"$tmp/err") || status=$?
+  out=$(LC_ALL="$diverging" "$RUNNER" --check-coverage 2>"$tmp/err") || status=$?
   err=$(cat "$tmp/err")
   rm -rf "$tmp"
 
   [ "$status" -eq 0 ] \
-    || fail "--check-coverage must succeed under $target, exited $status: $err"
-  assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker under $target"
+    || fail "--check-coverage must succeed under $diverging, exited $status: $err"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker under $diverging"
   # comm's own failures are masked by `|| true`, so stderr is the real signal.
   [ -z "$err" ] \
-    || fail "--check-coverage must be silent on stderr under $target, got: $err"
-  if [ -n "$diverging" ]; then
-    pass "coverage guard passes under a dictionary-collation locale ($target)"
-  else
-    pass "coverage guard passes under UTF-8 locale $target (no diverging-collation locale available here)"
-  fi
+    || fail "--check-coverage must be silent on stderr under $diverging, got: $err"
+  pass "coverage guard passes under a dictionary-collation locale ($diverging)"
 }
 
 test_portable_serial_shards_partition_the_serial_lane() {
