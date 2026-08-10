@@ -75,7 +75,7 @@ Every `/bearings` chat response renders EXACTLY these four sections, in THIS ord
    Empty-state: "No recent completions are in the current baseline."
 3. **Underway** - live work progressing on its own, one line of current state per direct report.
    Empty-state: "Nothing is underway."
-4. **Charted Next** - queued or gated work waiting on the fleet or a date, plus action-free fleet-integrity warnings, never on the captain.
+4. **Charted Next** - queued or gated work waiting on the fleet or a date, plus action-free fleet-integrity warnings and the friction surface, never on the captain.
    Empty-state: "Nothing is queued."
 
 Rules that keep the contract unambiguous:

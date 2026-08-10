@@ -70,9 +70,12 @@
 # never batched with ordinary friction, here or in bin/fm-friction.sh's own
 # rendering, because this mechanism ranks by how often something impeded work -
 # the right signal for a broken helper and the wrong one for a guard. friction[]
-# is bounded by FM_BEARINGS_FRICTION with an omitted[] row; friction_guards[] is
-# deliberately UNBOUNDED, because a bound on it is a way to hide a containment
-# guard and bin/fm-friction.sh already exempts guards from its own record cap.
+# is bounded by FM_BEARINGS_FRICTION with an omitted[] row, and the unattributable
+# aggregate is pinned to the FRONT of it rather than exempted from it, so that
+# bound can never cut the one row whose verbatim text is all it carries while the
+# rendered row count stays exactly the bound; friction_guards[] is deliberately
+# UNBOUNDED, because a bound on it is a way to hide a containment guard and
+# bin/fm-friction.sh already exempts guards from its own record cap.
 #
 # Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
 set -u
