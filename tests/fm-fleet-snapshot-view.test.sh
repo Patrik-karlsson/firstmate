@@ -858,9 +858,81 @@ test_oversized_projections_do_not_exceed_argv_limit() {
   pass "oversized backlog and task projections still assemble a snapshot, home summary, and bearings"
 }
 
+# A registered home's summary is admitted by FM_SNAPSHOT_SECONDMATE_MAX_BYTES,
+# whose default is twice MAX_ARG_STRLEN, so a summary sized between the two passes
+# that guard and must still reach the parent's jq by a route that is not argv.
+# The fixture drives one home's landed roll-up into that band, and the test asserts
+# the size the parent actually received before asserting the parent kept its
+# structured-home reading, so a later shrink cannot leave the case quietly green.
+write_band_secondmate_fixture() {  # <parent-home> <mate-home> <landed-rows>
+  local parent=$1 mate=$2 rows=$3 i id_pad title_pad url_pad report_pad
+  id_pad=$(printf '%0110d' 0)
+  title_pad=$(printf '%0104d' 0)
+  url_pad=$(printf '%0450d' 0)
+  report_pad=$(printf '%0440d' 0)
+  mkdir -p "$mate/bin"
+  printf '# Firstmate fixture\n' > "$mate/AGENTS.md"
+  printf 'mate\n' > "$mate/.fm-secondmate-home"
+  printf -- '- mate - fixture domain (home: %s; scope: fixture work; projects: alpha; added 2026-07-11)\n' \
+    "$mate" > "$parent/data/secondmates.md"
+  fm_write_meta "$parent/state/mate.meta" \
+    "window=firstmate:fm-mate" \
+    "worktree=$mate" \
+    "project=$mate" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$mate" \
+    "projects=alpha"
+  # A keyed open decision and a keyed activity on the parent stream, so the record
+  # the parent assembles carries a non-empty reconciliation alongside the summary.
+  printf 'needs-decision [key=race]: choose ordering\n' > "$parent/state/mate.status"
+  printf 'working [key=rollout]: landing the queue\n' >> "$parent/state/mate.status"
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    for i in $(seq -w 1 "$rows"); do
+      printf -- '- [x] landed-%s%s - Landed %s %s https://github.com/o/r/pull/%s?q=%s data/landed-%s%s/report.md (repo: alpha) (kind: ship) (merged 2026-07-06)\n' \
+        "$i" "$id_pad" "$i" "$title_pad" "$i" "$url_pad" "$i" "$report_pad"
+    done
+  } > "$mate/data/backlog.md"
+}
+
+test_home_summary_between_byte_guard_and_argv_limit() {
+  local parent mate fakebin out landed_bytes
+  parent=$(make_home band-parent)
+  mate=$(make_home band-mate)
+  write_band_secondmate_fixture "$parent" "$mate" 130
+  fakebin=$(make_fakebin "$parent")
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$parent" FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$SNAPSHOT" --json) \
+    || fail "parent snapshot must survive a home summary that clears the byte guard but exceeds the argv limit"
+
+  landed_bytes=$(printf '%s' "$out" | jq '.secondmate_current.records[0].landed | tojson | length')
+  [ "$landed_bytes" -gt "$MAX_ARG_STRLEN" ] \
+    || fail "fixture home summary carries only $landed_bytes bytes of landed work; it must exceed $MAX_ARG_STRLEN to exercise the band"
+
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records[0] as $mate
+    | $mate.provenance.selected == "structured-home"
+      and $mate.current.state != "unknown"
+      and $mate.counts.landed == 130
+      and ($mate.landed | length) == 130
+      and ($mate.parent_event.reconciliation.decisions | length) == 1
+      and (.secondmate_landed.records | length) == 130
+  ' >/dev/null || fail "parent degraded a readable home instead of reading its oversized summary: $(printf '%s' "$out" | jq -c '.secondmate_current.records[0] | {selected:.provenance.selected,state:.current.state,reason:.current.reason,counts}')"
+
+  # This record shape is newly reachable: before the summary left argv the parent
+  # degraded it to state:unknown, so no consumer had ever been handed one.
+  PATH="$fakebin:$PATH" FM_HOME="$parent" FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 \
+    "$ROOT/bin/fm-bearings-snapshot.sh" >/dev/null \
+    || fail "bearings must render a snapshot carrying an oversized home summary"
+  pass "a home summary between the byte guard and the argv limit still reaches the parent snapshot and its consumers"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_oversized_projections_do_not_exceed_argv_limit
+test_home_summary_between_byte_guard_and_argv_limit
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
