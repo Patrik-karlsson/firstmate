@@ -433,6 +433,64 @@ test_actionable_signal_surfaced() {
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
 }
 
+# Friction is non-blocking by contract, but it still GROWS the status file, and
+# the watcher's change detector is a size:mtime signature. Without the
+# friction-only delta check, every friction append would wake firstmate exactly
+# like a real status change - turning a mechanism built to remove noise into
+# noise, and costing a turn each time.
+#
+# The hardest case is friction appended after an already-surfaced `done:`, where
+# the still-captain-relevant done sits underneath: the append must be absorbed,
+# the done must NOT be re-escalated, and the done must still not be masked.
+test_friction_only_append_is_absorbed_not_escalated() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case friction-only-absorb); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'working: setup\ndone: PR https://example.invalid/pull/1 checks green\n' > "$status_file"
+  # The done has already been surfaced, so only the friction append is new.
+  printf '%s' "$(seen_sig "$status_file")" > "$state/.seen-task_status"
+  printf '%s' 'done: PR https://example.invalid/pull/1 checks green' > "$state/.hb-surfaced-task"
+
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  sleep 1
+  printf 'friction: [sig=issue-scope-understated] issue scope was badly understated\n' >> "$status_file"
+  wait_live "$pid" 40 \
+    || fail "a friction-only append woke the watcher; friction must not escalate like a status: $(cat "$out")"
+  reap "$pid"
+  [ "$(seen_sig "$status_file")" = "$(cat "$state/.seen-task_status")" ] \
+    || fail "an absorbed friction append must advance the suppressor so it cannot re-fire"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    && fail "a friction-only append must not print an actionable signal reason"
+  # Absorbed, but never at the cost of hiding the done underneath it.
+  [ "$(FM_STATE_OVERRIDE="$state" bash -c '. "$0"/bin/fm-classify-lib.sh; last_status_line "$1"' "$ROOT" "$status_file")" \
+    = "done: PR https://example.invalid/pull/1 checks green" ] \
+    || fail "friction became the task's last state-bearing line"
+  pass "a friction-only append is absorbed without escalating or masking the status beneath it"
+}
+
+# The absorb above must be narrow. A real status landing in the same window as a
+# friction line still surfaces, because the delta is then not friction-only.
+test_status_alongside_friction_still_surfaces() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case friction-plus-status); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'working: setup\n' > "$status_file"
+  printf '%s' "$(seen_sig "$status_file")" > "$state/.seen-task_status"
+
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  sleep 1
+  printf 'friction: [sig=slow-helper] helper took 40s\nneeds-decision: pick A or B\n' >> "$status_file"
+  wait_for_exit "$pid" 40 \
+    || { reap "$pid"; fail "a real status appended beside friction must still surface"; }
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "the mixed append did not produce an actionable signal: $(cat "$out")"
+  pass "a real status appended alongside friction is never swallowed by the friction absorb"
+}
+
 test_terminal_stale_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1812,6 +1870,8 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
+test_friction_only_append_is_absorbed_not_escalated
+test_status_alongside_friction_still_surfaces
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

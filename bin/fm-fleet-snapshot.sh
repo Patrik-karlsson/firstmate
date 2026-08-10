@@ -33,6 +33,15 @@
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
+#   friction: the `fm-friction.v1` model plus `available` - counts
+#     {surfaced,suppressed,unclassified,settled}, records[], records_total, and
+#     records_truncated for this home's durable friction records. Read through
+#     bin/fm-friction.sh without ingesting, so this snapshot stays a pure read;
+#     that script owns the record shape, the recurrence threshold, the count
+#     definitions, and the security-guard carve-out. A store that cannot be read
+#     reports available:false with a reason and zeroed counts rather than an
+#     empty section, so a renderer can still tell "nothing recorded" from "could
+#     not be read".
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
 #     (orphan structured in-flight ids with no state/<id>.meta, and unstructured
@@ -192,9 +201,13 @@ meta_value() {  # <meta-file> <key>
   fm_meta_get "$1" "$2"
 }
 
-last_nonempty_line() {  # <file>
+# Last state-bearing status line. fm-classify-lib.sh's last_status_line owns the
+# rule, including skipping the non-blocking friction verb so a friction append
+# never becomes a task's reported last event (and, through bearings, its
+# `doing`). Friction has its own surface below.
+last_nonempty_line() {  # <status-file>
   [ -f "$1" ] || return 1
-  grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
+  last_status_line "$1"
 }
 
 crew_state_json() {  # <id>
@@ -1345,6 +1358,28 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
+# Friction records for this home, from their one owner (bin/fm-friction.sh).
+# A PURE READ: the canonical snapshot never ingests, so read-only surfaces built
+# on it - /bearings above all - stay read-only.
+#
+# On any failure this reports available:false with a reason rather than an empty
+# section. A friction surface that cannot tell "nothing was recorded" from
+# "could not be read" is exactly the blind section the three counts exist to
+# prevent, so the distinction has to survive into the model.
+friction_json() {
+  local out
+  if out=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+             FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+             "$SCRIPT_DIR/fm-friction.sh" list --json 2>/dev/null) \
+     && printf '%s' "$out" | jq -e 'type == "object" and has("counts")' >/dev/null 2>&1; then
+    printf '%s' "$out" | jq '. + {available:true}'
+    return 0
+  fi
+  jq -n '{available:false, reason:"friction records could not be read",
+          counts:{surfaced:0,suppressed:0,unclassified:0,settled:0},
+          records:[], records_total:0, records_truncated:0}'
+}
+
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
@@ -1355,6 +1390,7 @@ if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
 fi
 
 SCOUT_REPORTS_JSON=$(scout_report_lines)
+FRICTION_JSON=$(friction_json)
 MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
@@ -1362,7 +1398,12 @@ SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
-jq -n \
+# The friction model arrives on stdin rather than through --argjson: it is the
+# one input here whose size tracks a never-pruned durable store rather than the
+# live fleet, and a single argv string is capped well below ARG_MAX, so an
+# oversized-but-valid friction read must not be able to take the whole snapshot
+# down with it.
+printf '%s' "$FRICTION_JSON" | jq -n \
   --arg generated "$SNAPSHOT_NOW" \
   --arg fm_home "$FM_HOME" \
   --arg fm_root "$FM_ROOT" \
@@ -1379,7 +1420,8 @@ jq -n \
   'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
-   {
+   input as $friction
+   | {
      schema:"fm-fleet-snapshot.v1",
      generated:$generated,
      fm_home:$fm_home,
@@ -1388,6 +1430,7 @@ jq -n \
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
+     friction:$friction,
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
      secondmate_guidance:{

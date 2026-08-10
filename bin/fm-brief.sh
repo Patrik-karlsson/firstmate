@@ -49,6 +49,12 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every scaffold also teaches the non-blocking friction verb
+# (FM_CLASSIFY_FRICTION_VERB, default "friction"), which is the one append that
+# declares no state at all: the worker hit resistance and kept going. Workers
+# have to be told it exists, because the instinct when nothing is blocked is to
+# say nothing, and a signature only becomes actionable once a SECOND task hits
+# it. bin/fm-friction.sh owns what happens to it afterwards.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -76,6 +82,7 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+FRICTION_VERB=${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -238,6 +245,9 @@ Report only true captain-relevant outcomes or a declared external wait by append
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
+Append \`$FRICTION_VERB: [sig=<stable-slug>] {what impeded the work}\` when something impeded your domain without blocking it - an issue whose stated scope is badly understated, a helper that refuses, documented advice that contradicts a hook.
+It declares no state, parks nothing, needs no answer, and does not wake firstmate on its own, so append it and carry on; the report-sparingly rule above does not apply to it.
+Make \`sig\` name the thing that would REPEAT (\`issue-scope-understated\`, \`agents-md-conflict\`), never the instance, and name the rule, helper, or path CLASS rather than pasting the command line, the matched text, or file contents.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
 A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
@@ -327,6 +337,13 @@ The report is the only thing that survives, so anything worth keeping must be in
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
    treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   Append \`$FRICTION_VERB: [sig=<stable-slug>] {what impeded the work}\` when something impeded
+   the work but did NOT block you - an issue whose stated scope is badly understated, a helper
+   that refuses, documented advice that contradicts a hook. It declares no state: you keep
+   going, it parks nothing, nobody has to answer it, and it does not wake firstmate on its
+   own, so append it when you hit the thing rather than saving it for the report. Make \`sig\` name the thing that would REPEAT
+   (\`issue-scope-understated\`, \`agents-md-conflict\`), never the instance, and name the rule,
+   helper, or path CLASS - never the command line, the matched text, or file contents.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -443,6 +460,13 @@ $RULE1
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   Append \`$FRICTION_VERB: [sig=<stable-slug>] {what impeded the work}\` when something impeded
+   the work but did NOT block you - an issue whose stated scope is badly understated, a helper
+   that refuses, documented advice that contradicts a hook. It declares no state: you keep
+   going, it parks nothing, nobody has to answer it, and it does not wake firstmate on its
+   own, so append it when you hit the thing rather than saving it for the end. Make \`sig\` name the thing that would REPEAT
+   (\`issue-scope-understated\`, \`agents-md-conflict\`), never the instance, and name the rule,
+   helper, or path CLASS - never the command line, the matched text, or file contents.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.

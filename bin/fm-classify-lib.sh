@@ -77,11 +77,95 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
-# Return the last non-blank line of a status file (empty if missing/blank).
+# The non-blocking resistance verb. A worker that hit something impeding the
+# work WITHOUT being blocked by it appends
+#   friction: [sig=<stable-slug>] <one-line observation>
+# and keeps going. Unlike every other verb in this vocabulary it declares no
+# state at all: it neither opens nor closes a decision, neither opens nor closes
+# a work phase, never parks a worker, and never gates teardown. See the
+# "friction signal" section below for the fold; bin/fm-friction.sh owns the
+# durable record and the captain's triage. FM_CLASSIFY_FRICTION_VERB overrides
+# the verb so a home can rename it alongside the other configurable verbs.
+FM_CLASSIFY_FRICTION_VERB_DEFAULT='friction'
+
+# Return the last non-blank STATE-BEARING line of a status file (empty if
+# missing/blank/unreadable). This is the ONE definition of "the line that says
+# what this task is doing", and every consumer that reconciles state reads it
+# here rather than re-rolling its own tail.
+#
+# `friction:` lines are skipped, because friction is TRANSPARENT to state (see
+# the "friction signal" section below). A worker appending friction after
+# `done:` must not hide the done from the fleet scan, and a worker appending
+# friction while working must not turn a provably-working crew into an unknown
+# one. Skipping the verb here - rather than mapping it to some state - is what
+# makes "friction never changes a task's run state" true for the watcher, the
+# away-mode daemon, the stale path, and the fleet scan at once.
+# Raw status tails (the session-start digest, a captain reading the log) are
+# unaffected: they read the file directly and still show every friction event.
+# Both supervisors call this per status file per poll, and a status log only
+# grows. Per line the work is two glob screens - a line is skipped as blank only
+# if it holds no non-space character, and it reaches the real friction predicate
+# only if it could plausibly start with that verb - but per-line bash over a long
+# log costs far more than the screens, so the common case reads a bounded TAIL
+# rather than the file:
+#   1. Scan the last FM_CLASSIFY_STATUS_TAIL lines. A state-bearing line found
+#      there is necessarily the file's last one, because every later line is in
+#      the tail too. This is the shape a finished task leaves - the state line
+#      IS the last line - so the bound only has to absorb friction appended
+#      after it, and a small bound is what keeps the miss below cheap.
+#   2. A tail SHORTER than the bound was the whole file, so an empty answer is
+#      already exact and no second read happens.
+#   3. Only a full-length tail holding no state-bearing line falls back to
+#      scanning the file. That is the mid-run shape - one `working:` line then
+#      nothing but friction - where the answer is at the front and reading the
+#      file is unavoidable, so the fallback is kept to ONE extra pass over a
+#      bounded tail rather than a second bounded scan on top of it.
+# The bound is small on purpose. It only has to span the friction a worker
+# appends AFTER its last state line, which is a handful; every line beyond that
+# is pure overhead on the fallback, which is the mid-run shape and therefore the
+# common one. Raising it buys nothing and makes the miss path slower.
+FM_CLASSIFY_STATUS_TAIL_DEFAULT=20
+
+# Scan a status stream to EOF for the last state-bearing line, into
+# _FM_LAST_STATUS_LINE, reporting lines read in _FM_LAST_STATUS_LINES so a
+# caller can tell a truncated tail from a whole file.
+_fm_last_status_line_scan() {
+  local line friction n=0
+  _FM_LAST_STATUS_LINE=''
+  friction=${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Counted before the screens: a tail of nothing but blank and friction lines
+    # still proves how much of the file was read.
+    n=$((n + 1))
+    case "$line" in
+      *[![:space:]]*) ;;
+      *) continue ;;
+    esac
+    case "$line" in
+      "$friction"*|[[:space:]]*)
+        # The shared verb setter directly rather than status_is_friction, which
+        # only wraps it: one bash function call per candidate line instead of
+        # two, on the loop both supervisors run per status file per poll. The
+        # rule still has exactly one owner - this does not re-parse the verb.
+        _fm_status_line_verb "$line"
+        [ "$_FM_STATUS_LINE_VERB" != "$friction" ] || continue
+        ;;
+    esac
+    _FM_LAST_STATUS_LINE=$line
+  done
+  _FM_LAST_STATUS_LINES=$n
+}
+
 last_status_line() {
-  local f=$1
-  [ -e "$f" ] || return 0
-  grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
+  local f=$1 n
+  { [ -f "$f" ] && [ -r "$f" ]; } || return 0
+  n=${FM_CLASSIFY_STATUS_TAIL:-$FM_CLASSIFY_STATUS_TAIL_DEFAULT}
+  case "$n" in ''|*[!0-9]*|0) n=$FM_CLASSIFY_STATUS_TAIL_DEFAULT ;; esac
+  _fm_last_status_line_scan < <(tail -n "$n" "$f" 2>/dev/null)
+  if [ -z "$_FM_LAST_STATUS_LINE" ] && [ "$_FM_LAST_STATUS_LINES" -ge "$n" ]; then
+    _fm_last_status_line_scan < "$f"
+  fi
+  printf '%s' "$_FM_LAST_STATUS_LINE"
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
@@ -108,7 +192,7 @@ status_is_captain_relevant() {
   status_is_paused "$line" && return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|"${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}")
       return 1
       ;;
   esac
@@ -144,6 +228,19 @@ status_is_paused_or_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
+# 0 if a status line's leading verb is the non-blocking friction verb. A pure
+# read of the line itself, matching only the verb before the first colon so an
+# observation that mentions friction elsewhere does not false-match. This is the
+# predicate the friction-only delta test reads a status append through;
+# last_status_line's scan resolves the same verb through _fm_status_line_verb
+# directly, to spend one bash function call per candidate line rather than two.
+status_is_friction() {  # <status-line>
+  local line=$1
+  [ -n "$line" ] || return 1
+  _fm_status_line_verb "$line"
+  [ "$_FM_STATUS_LINE_VERB" = "${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}" ]
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins
@@ -167,18 +264,33 @@ status_is_paused_or_captain_held() {  # <status-line>
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
-status_line_verb() {  # <status-line> -> leading verb word
+#
+# The verb parse itself, resolved into _FM_STATUS_LINE_VERB rather than through
+# a command substitution. Parameter expansion only, no subshell: the per-line
+# predicates below run this once per candidate line, per status file, per
+# supervision poll, so a $(...) here costs a fork for every friction line a
+# worker ever appended. status_line_verb is the value-returning form every
+# other caller uses, and stays the only place the rule is written.
+_fm_status_line_verb() {  # <status-line> -> sets _FM_STATUS_LINE_VERB
   local v=${1%%:*}
   v=${v%%\[key=*}
   v=${v#"${v%%[![:space:]]*}"}
-  v=${v%"${v##*[![:space:]]}"}
-  printf '%s' "$v"
+  _FM_STATUS_LINE_VERB=${v%"${v##*[![:space:]]}"}
+}
+status_line_verb() {  # <status-line> -> leading verb word
+  _fm_status_line_verb "$1"
+  printf '%s' "$_FM_STATUS_LINE_VERB"
+}
+_fm_status_line_note() {  # <status-line> -> sets _FM_STATUS_LINE_NOTE
+  local n
+  case "$1" in
+    *:*) n=${1#*:}; _FM_STATUS_LINE_NOTE=${n#"${n%%[![:space:]]*}"} ;;
+    *) _FM_STATUS_LINE_NOTE=$1 ;;
+  esac
 }
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
-  case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *) printf '%s' "$1" ;;
-  esac
+  _fm_status_line_note "$1"
+  printf '%s' "$_FM_STATUS_LINE_NOTE"
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   local prefix=${1%%:*} k
@@ -565,6 +677,245 @@ status_open_activities() {  # <status-file-or-dash>
   fi
   [ -f "$f" ] || return 0
   _fm_status_open_activities_stream < "$f"
+}
+
+# --- friction signal --------------------------------------------------------
+#
+# `friction: [sig=<stable-slug>] <one-line observation>` records that a worker
+# hit resistance and KEPT GOING. The fleet's other verbs all answer "what state
+# is this task in"; friction answers "what impeded it", which is a different
+# question with a different lifetime - the task finishes, the friction stays.
+#
+# The verb is deliberately inert in every state fold above: the decision fold
+# (_fm_decision_fold_line) neither opens nor closes on it, the activity fold
+# (_fm_status_open_activities_stream) neither opens nor closes on it,
+# status_is_captain_relevant excludes it, and last_status_line skips it. So a
+# friction append can never park a worker, mask a decision, resolve a phase, or
+# gate teardown. That inertness is the contract; the functions below only READ
+# these lines back out.
+#
+# Signature grammar. The signature names THE THING THAT WOULD REPEAT
+# (`issue-scope-understated`, `agents-md-conflict`, `freeze-guard-denied-edit`),
+# never the instance. It sits at the START of the note, after the colon:
+#
+#   friction: [sig=issue-scope-understated] issue said 4 bad blocks, found 21
+#
+# That is a different position from the decision-key token, which sits BEFORE
+# the colon (`needs-decision [key=api-shape]: ...`), because a signature is part
+# of what the worker is reporting rather than a routing key on the event. The
+# slug charset is the decision key's, with ONE added rule: a signature may not
+# begin with `.`, because a signature becomes a durable filename under
+# data/friction/ and a dotfile record is invisible to the directory glob that
+# reads those records back - a write-only record is exactly the silent loss the
+# unclassified sentinel exists to prevent. A decision key is never a filename,
+# so it keeps the bare charset.
+#
+# Payload safety is structural, not filtered. The only input is a worker's
+# one-line status append: this code never reads a command line, a matched
+# string, or file contents, so there is nothing here that could move a
+# credential-shaped payload into a durable record. What a worker types is
+# bounded and flattened (see _fm_friction_flatten) but deliberately not
+# scrubbed - an entropy heuristic over one English sentence is a false-positive
+# machine. bin/fm-brief.sh teaches workers to name the rule or helper and a path
+# CLASS rather than pasting the offending text.
+FM_CLASSIFY_FRICTION_UNCLASSIFIED='(unclassified)'
+
+# Longest observation retained. A status note is one line by construction; this
+# only bounds a pathological append. Not a valid slug character in the sentinel
+# above, so `(unclassified)` can never collide with a real signature.
+FM_CLASSIFY_FRICTION_TEXT_MAX_DEFAULT=200
+
+# Collapse an observation to one TAB-free bounded field. TAB is the record
+# separator the readers below emit, so it cannot survive inside a value; every
+# other character is preserved exactly, which is what keeps an unclassified
+# line's own text readable when it surfaces.
+#
+# Each parser below comes in two forms, for the same reason status_line_verb
+# does: a setter that resolves into a named global through parameter expansion
+# alone, and a value-returning wrapper over it. The scan under them runs every
+# parser once per friction line of every status log on the fleet-snapshot read
+# path, so a $(...) per parser is four forks per accumulated line. The setters
+# use distinct globals so a caller can hold a signature while resolving a text.
+_fm_friction_flatten_var() {  # <text> -> sets _FM_FRICTION_FLAT
+  # Trim, BOUND, then flatten. The tab substitution rebuilds the string per
+  # match, so running it on the raw line makes a pathological append cost
+  # seconds on every read rather than being bounded by the very limit below.
+  # Order is safe because the trims are anchored strips that already treat tab
+  # as whitespace, and tab-to-space is length-preserving, so bounding first
+  # yields the same bytes.
+  local t=$1 max
+  t=${t#"${t%%[![:space:]]*}"}
+  t=${t%"${t##*[![:space:]]}"}
+  max=${FM_CLASSIFY_FRICTION_TEXT_MAX:-$FM_CLASSIFY_FRICTION_TEXT_MAX_DEFAULT}
+  case "$max" in ''|*[!0-9]*|0) max=$FM_CLASSIFY_FRICTION_TEXT_MAX_DEFAULT ;; esac
+  if [ "${#t}" -le "$max" ]; then t=${t//$'\t'/ }; else t="${t:0:$max}"; t="${t//$'\t'/ }..."; fi
+  _FM_FRICTION_FLAT=$t
+}
+_fm_friction_flatten() {  # <text>
+  _fm_friction_flatten_var "$1"
+  printf '%s' "$_FM_FRICTION_FLAT"
+}
+
+# THE signature grammar, in one place, because it is applied by three different
+# consumers in two different languages: the parser below, bin/fm-friction.sh's
+# record_path (which turns a signature into a filename), and that script's
+# stored-record screen (jq). A signature legal to parse but rejected by one of
+# the others becomes a record that is written and then unreadable, which is the
+# silent loss the unclassified sentinel exists to prevent - so the rule cannot
+# be hand-copied per consumer. The regex below encodes the same accept set as
+# the shell pattern: non-empty, every character in the class, and a first
+# character that is not `.` (a leading dot would make the record a dotfile the
+# reading glob never matches).
+#
+# The anchors are ABSOLUTE - `\A` and `\z`, not `^` and `$`. jq's test() is
+# Oniguruma, where `$` also matches before one trailing newline, so `^...$`
+# admits "abc\n" while the shell pattern refuses it. That single disagreement is
+# the worst one available: write_record derives the filename through a command
+# substitution, which strips the trailing newline, so such a record would be
+# written over the legitimate `abc` record's file and take its count, its tasks
+# and its surfaced state with it, at rc=0 and with nothing printed. `\A` is
+# spelled out alongside `\z` rather than left as `^` so the accept set does not
+# depend on which Oniguruma dialect the local jq was built with.
+# shellcheck disable=SC2034 # Read by bin/fm-friction.sh's stored-record screen, not this lib.
+FM_CLASSIFY_FRICTION_SIG_RE='\A[A-Za-z0-9_-][A-Za-z0-9._-]*\z'
+
+friction_sig_is_legal() {  # <sig>
+  case "$1" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
+_fm_status_line_friction_sig() {  # <status-line> -> sets _FM_FRICTION_SIG; 1 when absent/malformed
+  local k
+  _fm_status_line_note "$1"
+  case "$_FM_STATUS_LINE_NOTE" in
+    '[sig='*']'*) ;;
+    *) return 1 ;;
+  esac
+  k=${_FM_STATUS_LINE_NOTE#\[sig=}
+  k=${k%%\]*}
+  friction_sig_is_legal "$k" || return 1
+  _FM_FRICTION_SIG=$k
+}
+status_line_friction_sig() {  # <status-line> -> sig slug; 1 when absent/malformed
+  _fm_status_line_friction_sig "$1" || return 1
+  printf '%s' "$_FM_FRICTION_SIG"
+}
+
+_fm_status_line_friction_text() {  # <status-line> -> sets _FM_FRICTION_TEXT
+  local rest
+  _fm_status_line_note "$1"
+  case "$_FM_STATUS_LINE_NOTE" in
+    '[sig='*']'*)
+      rest=${_FM_STATUS_LINE_NOTE#*\]}
+      _FM_FRICTION_TEXT=${rest#"${rest%%[![:space:]]*}"}
+      ;;
+    *) _FM_FRICTION_TEXT=$_FM_STATUS_LINE_NOTE ;;
+  esac
+}
+status_line_friction_text() {  # <status-line> -> observation, sig token removed
+  _fm_status_line_friction_text "$1"
+  printf '%s' "$_FM_FRICTION_TEXT"
+}
+
+# Every friction event in ONE status log, as "<ordinal>\t<sig>\t<observation>".
+#
+# The ordinal is this event's 1-based position among the friction lines of this
+# file. Together with the task id and the observation text it forms the identity
+# bin/fm-friction.sh dedupes on, so folding the same log twice can never inflate
+# a count. Both the durable ingest and the live read compute that identity from
+# THIS function, so the two paths cannot drift into double-counting.
+#
+# A line whose signature is missing or malformed is NOT skipped: it is reported
+# under the FM_CLASSIFY_FRICTION_UNCLASSIFIED sentinel carrying the whole raw
+# line as its observation, so a worker's typo degrades into a visible
+# unclassified record instead of a silent loss. Observation text is last in the
+# record, so a reader splitting on TAB can take the remainder verbatim.
+#
+# The emitter takes a record PREFIX so the fleet-wide scan below can put its task
+# id in front without a second parse or a per-file subshell. Both entry points
+# share it, so a friction line is still parsed in exactly one place.
+_fm_friction_events_stream() {  # <status-file> <record-prefix>
+  local f=$1 prefix=$2 line friction n=0
+  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ]; } || return 0
+  friction=${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Same cheap prefix screen as last_status_line: only a line that could
+    # plausibly carry the verb pays for parsing it.
+    case "$line" in
+      "$friction"*|[[:space:]]*) ;;
+      *) continue ;;
+    esac
+    _fm_status_line_verb "$line"
+    [ "$_FM_STATUS_LINE_VERB" = "$friction" ] || continue
+    n=$((n + 1))
+    if _fm_status_line_friction_sig "$line"; then
+      _fm_status_line_friction_text "$line"
+    else
+      _FM_FRICTION_SIG=$FM_CLASSIFY_FRICTION_UNCLASSIFIED
+      _FM_FRICTION_TEXT=$line
+    fi
+    _fm_friction_flatten_var "$_FM_FRICTION_TEXT"
+    printf '%s%s\t%s\t%s\n' "$prefix" "$n" "$_FM_FRICTION_SIG" "$_FM_FRICTION_FLAT"
+  done < "$f"
+  return 0
+}
+status_friction_events() {  # <status-file>
+  _fm_friction_events_stream "$1" ""
+}
+
+# 0 when every non-blank line appended to <status-file> beyond <previous-size>
+# bytes is a friction line, and at least one such line exists.
+#
+# A friction append grows the status file, and the watcher's change detector is
+# a size:mtime signature, so without this the append wakes firstmate exactly
+# like a real status change - and a mechanism built to remove noise becomes
+# noise. This is the precise test that lets a supervisor absorb it.
+#
+# Deliberately fail-closed in every uncertain case, because absorbing a real
+# status is far worse than one extra wake. It reads ONLY the appended bytes and
+# returns 1 - surface it - when the file shrank, is unreadable, has no recorded
+# previous size (a first sighting), grew by nothing, or grew by anything that is
+# not a friction line. A torn write whose delta begins mid-line also fails to
+# match, and the completed line changes the size again on the next poll.
+status_delta_is_friction_only() {  # <status-file> <previous-size>
+  local f=$1 prev=$2 size line friction saw=1
+  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ]; } || return 1
+  case "$prev" in ''|*[!0-9]*) return 1 ;; esac
+  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$prev" -lt "$size" ] || return 1
+  friction=${FM_CLASSIFY_FRICTION_VERB:-$FM_CLASSIFY_FRICTION_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *[![:space:]]*) ;;
+      *) continue ;;
+    esac
+    case "$line" in
+      "$friction"*|[[:space:]]*)
+        status_is_friction "$line" || return 1
+        saw=0
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(tail -c "+$((prev + 1))" "$f" 2>/dev/null)
+  return "$saw"
+}
+
+# Fleet-wide wrapper: every friction event under <state>, prefixed with its
+# owning task id, as "<task>\t<ordinal>\t<sig>\t<observation>" in glob order.
+# A thin directory scan only - status_friction_events stays the ONE place a
+# friction line is parsed. Symlinked status files are rejected by that function
+# before any read, matching scan_open_decisions.
+scan_friction() {  # <state>
+  local state=$1 f task
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    task=${f##*/}; task="${task%.status}"
+    _fm_friction_events_stream "$f" "$task"$'\t'
+  done
+  return 0
 }
 
 # task id from a recorded window target, falling back to the tmux-shaped

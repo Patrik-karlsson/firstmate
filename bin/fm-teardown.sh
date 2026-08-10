@@ -132,6 +132,22 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
+
+# Fold friction into its durable store BEFORE any status log is removed.
+# A friction signature outlives the task that reported it - the whole point is
+# that two different tasks hit the same thing - so data/friction/ is where it
+# has to survive cleanup, and this is the last moment the status log still
+# exists to read.
+#
+# Best-effort by contract: friction never gates teardown. A failure prints a
+# notice and cleanup continues, because stranding landed work to save a
+# friction record would be the wrong trade. The notice exists so the loss is
+# never silent.
+preserve_friction() {
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-friction.sh" ingest >/dev/null 2>&1 \
+    || echo "notice: friction records could not be folded before cleanup; run bin/fm-friction.sh ingest to check" >&2
+}
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -338,6 +354,7 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
+  preserve_friction
   rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended" \
     "$STATE/.$ID.open-decisions-cursor"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
@@ -2349,6 +2366,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+preserve_friction
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \

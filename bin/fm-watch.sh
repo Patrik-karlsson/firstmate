@@ -13,7 +13,17 @@
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#                          is not provably working, unless afk is active.
+#                          Outside afk, a record set whose every file is a status
+#                          log that grew ONLY by non-blocking friction lines is
+#                          absorbed BEFORE that verb test, so appending friction
+#                          never wakes firstmate even when an older
+#                          captain-relevant line is still in the file; that older
+#                          line stays eligible for the heartbeat backstop because
+#                          this absorb deliberately does not mark it surfaced.
+#                          It fails closed to the normal rules on a mixed delta,
+#                          a first sighting with no recorded size, a file that
+#                          did not grow, or an unreadable read.
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -459,6 +469,37 @@ scan_signals() {
   return 0
 }
 
+# 0 when EVERY changed file in a scan_signals record set is a status log that
+# grew only by friction lines. Friction is non-blocking by contract, but it
+# still grows the file, so without this every friction append would wake
+# firstmate exactly like a real status change - and a mechanism built to remove
+# noise would become noise.
+#
+# Narrow on purpose. A turn-end marker, a first sighting with no recorded size,
+# or any non-friction content in the delta makes this false, so a real status
+# landing in the same window is never swallowed. fm-classify-lib.sh owns what
+# counts as a friction-only delta; the previous size comes from the file's own
+# .seen-* signature, which the caller has not overwritten yet.
+pending_is_friction_only() {  # <scan_signals-records>
+  local records=$1 rec tab psf pf prev any=1
+  tab=$(printf '\t')
+  while IFS= read -r rec; do
+    [ -n "$rec" ] || continue
+    # First and last fields of "<seen-file>\t<sig>\t<file>"; the middle
+    # signature is not needed here, and no path in this set contains a tab.
+    psf=${rec%%"$tab"*}
+    pf=${rec##*"$tab"}
+    [ -n "$psf" ] || continue
+    case "$pf" in *.status) ;; *) return 1 ;; esac
+    prev=$(cat "$psf" 2>/dev/null || true)
+    status_delta_is_friction_only "$pf" "${prev%%:*}" || return 1
+    any=0
+  done <<EOF
+$records
+EOF
+  return "$any"
+}
+
 # Deliver a durably queued process-event result to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
@@ -892,8 +933,23 @@ EOF
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    # A friction-only append is checked BEFORE the captain-verb test, because
+    # friction is non-blocking by contract: appending it must never wake
+    # firstmate the way an actionable status does, or the mechanism built to
+    # remove noise becomes noise. It is checked AFTER afk, so away mode's
+    # every-wake contract is unchanged. The record itself is durable in
+    # data/friction/, so absorbing the wake loses nothing.
+    signal_absorb_note=benign
+    signal_actionable=0
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    if afk_present; then
+      signal_actionable=1
+    elif pending_is_friction_only "$pending"; then
+      signal_absorb_note='friction-only'
+    elif signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+      signal_actionable=1
+    fi
+    if [ "$signal_actionable" = 1 ]; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -909,13 +965,17 @@ $pending
 EOF
       wake "$reason"
     else
+      # Markers advance either way so an absorbed wake cannot re-fire. A
+      # friction-only absorb deliberately does NOT mark_surfaced: it surfaced
+      # nothing, so a captain-relevant line sitting underneath stays eligible
+      # for the heartbeat backstop.
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
       done <<EOF
 $pending
 EOF
-      triage_log "absorbed benign $reason"
+      triage_log "absorbed $signal_absorb_note $reason"
     fi
   fi
 
