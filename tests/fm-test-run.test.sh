@@ -393,39 +393,56 @@ test_portable_shard_union_and_coverage_guard() {
 # environmental reason. C.UTF-8 collates by codepoint and does NOT reproduce
 # this, so the locale must be chosen by probing for real collation divergence
 # rather than by picking any UTF-8 name.
+#
+# Collation is a platform property, not just a locale-name property: glibc
+# ignores punctuation at the primary level, while stock BSD/macOS sort does not,
+# so a diverging locale may not exist at all there. The guard must therefore
+# hold under whatever UTF-8 locale is available on every platform, and the
+# divergence case is asserted as an ADDITIONAL requirement wherever one exists
+# rather than being demanded everywhere.
 test_coverage_guard_survives_a_dictionary_collation_locale() {
-  local loc probe_c probe_l diverging="" out err status tmp
+  local loc probe_c probe_l diverging="" first="" target out err status tmp
   probe_c=$(printf 'fm-x.test.sh\nfm-x-y.test.sh\n' | LC_ALL=C sort)
   while read -r loc; do
     [ -n "$loc" ] || continue
     probe_l=$(printf 'fm-x.test.sh\nfm-x-y.test.sh\n' | LC_ALL="$loc" sort 2>/dev/null)
-    if [ -n "$probe_l" ] && [ "$probe_l" != "$probe_c" ]; then
+    [ -n "$probe_l" ] || continue
+    [ -n "$first" ] || first=$loc
+    if [ -z "$diverging" ] && [ "$probe_l" != "$probe_c" ]; then
       diverging=$loc
-      break
     fi
   done < <(locale -a 2>/dev/null | grep -iE 'utf-?8')
 
-  # Refuse a vacuous pass: without a diverging locale this case proves nothing.
-  [ -n "$diverging" ] \
-    || fail "no UTF-8 locale on this system collates differently from C; the coverage guard's locale contract cannot be exercised here"
+  [ -n "$first" ] \
+    || fail "no usable UTF-8 locale on this system; the coverage guard's locale contract cannot be exercised here"
 
-  # Assert the divergence itself, so the case cannot go quietly vacuous.
-  [ "$(printf 'fm-x.test.sh\nfm-x-y.test.sh\n' | LC_ALL="$diverging" sort)" != "$probe_c" ] \
-    || fail "locale $diverging was selected as diverging but collates like C"
+  # Prefer a locale that actually reorders the C-sorted lists, because only that
+  # one reproduces the original defect; fall back to any UTF-8 locale so the
+  # guard is still exercised on platforms whose collation never diverges.
+  target=${diverging:-$first}
+  if [ -n "$diverging" ]; then
+    # Assert the divergence itself, so this case cannot go quietly vacuous.
+    [ "$(printf 'fm-x.test.sh\nfm-x-y.test.sh\n' | LC_ALL="$diverging" sort)" != "$probe_c" ] \
+      || fail "locale $diverging was selected as diverging but collates like C"
+  fi
 
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-locale.XXXXXX")
   status=0
-  out=$(LC_ALL="$diverging" "$RUNNER" --check-coverage 2>"$tmp/err") || status=$?
+  out=$(LC_ALL="$target" "$RUNNER" --check-coverage 2>"$tmp/err") || status=$?
   err=$(cat "$tmp/err")
   rm -rf "$tmp"
 
   [ "$status" -eq 0 ] \
-    || fail "--check-coverage must succeed under $diverging, exited $status: $err"
-  assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker under $diverging"
+    || fail "--check-coverage must succeed under $target, exited $status: $err"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker under $target"
   # comm's own failures are masked by `|| true`, so stderr is the real signal.
   [ -z "$err" ] \
-    || fail "--check-coverage must be silent on stderr under $diverging, got: $err"
-  pass "coverage guard passes under a dictionary-collation locale ($diverging)"
+    || fail "--check-coverage must be silent on stderr under $target, got: $err"
+  if [ -n "$diverging" ]; then
+    pass "coverage guard passes under a dictionary-collation locale ($target)"
+  else
+    pass "coverage guard passes under UTF-8 locale $target (no diverging-collation locale available here)"
+  fi
 }
 
 test_portable_serial_shards_partition_the_serial_lane() {
