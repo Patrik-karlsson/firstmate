@@ -1142,6 +1142,44 @@ test_unclassified_aggregate_survives_the_record_cap() {
   pass "the unclassified aggregate survives the record cap on both surfaces"
 }
 
+test_bearings_display_bound_never_cuts_the_unattributable_aggregate() {
+  local home json i
+  home=$(make_home bearings-bound-aggregate)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  task_project "$home" task-z lobbyn
+  # Three surfaced signatures against a display bound of two, so the ranked list
+  # is genuinely over-subscribed and something must be cut.
+  for i in 1 2 3; do
+    status_append "$home" task-a "friction: [sig=ordinary-$i] noise $i in a"
+    status_append "$home" task-b "friction: [sig=ordinary-$i] noise $i in b"
+  done
+  status_append "$home" task-z "friction: an observation carrying no signature at all"
+
+  json=$(FM_HOME="$home" FM_BEARINGS_FRICTION=2 "$BEARINGS" --json 2>/dev/null) \
+    || fail "bearings must render under a tight display bound"
+
+  # The aggregate is never `surfaced`, so it ranks last and is the first row a
+  # prefix slice would drop. Its verbatim text is the only thing it carries -
+  # there is no signature to act on - so cutting the row is cutting the finding.
+  printf '%s' "$json" | jq -e '
+    ([.friction[] | select(.state == "unclassified")] | length) == 1
+  ' >/dev/null || fail "the display bound must never cut the aggregate: $(printf '%s' "$json" | jq -c '[.friction[]|{sig,state}]')"
+
+  # Surviving is only half the contract. The aggregate is pinned INSIDE the
+  # bound, not exempted from it, so the rendered row count is still exactly the
+  # bound. Without this a change that exempts it outright renders bound+1 rows
+  # and still passes the assertion above.
+  printf '%s' "$json" | jq -e '(.friction | length) == 2' >/dev/null \
+    || fail "the aggregate must be pinned inside the bound, not exempted from it: $(printf '%s' "$json" | jq -c '{rows:(.friction|length),states:[.friction[].state]}')"
+
+  # The count is reported whether or not the row survives, so it cannot stand in
+  # for the row - both are asserted.
+  printf '%s' "$json" | jq -e '.friction_unclassified == 1' >/dev/null \
+    || fail "the unclassified count must still be reported: $(printf '%s' "$json" | jq -c '.friction_unclassified')"
+  pass "the bearings display bound pins the unattributable aggregate inside it"
+}
+
 test_unreadable_store_reports_unavailable_not_empty() {
   local home json rc
   home=$(make_home unreadable-store)
@@ -1408,6 +1446,7 @@ test_an_unusual_but_legal_signature_survives_teardown
 test_signature_grammar_agrees_across_its_consumers
 test_dismiss_refuses_a_settled_signature
 test_unclassified_aggregate_survives_the_record_cap
+test_bearings_display_bound_never_cuts_the_unattributable_aggregate
 test_unreadable_store_reports_unavailable_not_empty
 test_stored_signature_cannot_collide_with_a_legitimate_record
 test_retained_observations_follow_recency_not_task_id

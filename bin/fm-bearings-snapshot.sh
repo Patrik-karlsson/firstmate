@@ -468,9 +468,20 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   # row; the guard array is bounded by NOTHING, because a bound on it is a way to
   # hide a containment guard - bin/fm-friction.sh exempts guards from its own
   # record bound for the same reason. Do not add a cap here.
-  # The unattributable aggregate carries security:false and stays with the
-  # ordinary rows.
-  | ([ $friction_rows[] | select(.security | not) ]) as $friction_all
+  # The unattributable aggregate carries security:false, so it competes for a
+  # slot in the ranked list rather than leaving it the way a guard does. It is
+  # pinned to the FRONT of that list here, and deliberately still counts against
+  # FM_BEARINGS_FRICTION, so the rendered row count is exactly the bound.
+  # It has to be pinned at the surface that does the cutting. bin/fm-friction.sh
+  # ranks it last (it is never `surfaced`) and only its own cap_model exemption
+  # hauls it back to the front; a plain prefix slice here then preserves that
+  # order by accident. Re-deriving the position at this surface is what keeps a
+  # later sort_by from silently cutting the one row whose verbatim text is the
+  # only thing it carries - there is no signature to act on, so dropping the row
+  # is dropping the finding, while friction_unclassified keeps printing.
+  | ([ $friction_rows[] | select((.security | not) and .state == "unclassified") ]) as $friction_unattributed
+  | ([ $friction_rows[] | select((.security | not) and .state != "unclassified") ]) as $friction_ranked
+  | ($friction_unattributed + $friction_ranked) as $friction_all
   | ([ $friction_rows[] | select(.security) ]) as $friction_guards_all
   | . as $snap
   | {
