@@ -25,8 +25,8 @@ test_list_all_exact_suite_coverage() {
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
-  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
   [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
   [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
   # No duplicates.
@@ -359,7 +359,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -384,6 +384,48 @@ test_portable_shard_union_and_coverage_guard() {
   [ "$first" = "tests/fm-x-mode.test.sh" ] \
     || fail "shard 1 must start with the longest proven script, got $first"
   pass "portable shard union, disjointness, and coverage guard hold"
+}
+
+# The coverage guard sorts its file lists with LC_ALL=C but must also compare
+# them under LC_ALL=C. A dictionary-collation locale orders punctuation
+# differently from byte order, so an unpinned comm rejects those C-sorted lists
+# with "input is not in sorted order" and the guard fails for a purely
+# environmental reason. C.UTF-8 collates by codepoint and does NOT reproduce
+# this, so the locale must be chosen by probing for real collation divergence
+# rather than by picking any UTF-8 name.
+test_coverage_guard_survives_a_dictionary_collation_locale() {
+  local loc probe_c probe_l diverging="" out err status tmp
+  probe_c=$(printf 'fm-x.test.sh\nfm-x-y.test.sh\n' | LC_ALL=C sort)
+  while read -r loc; do
+    [ -n "$loc" ] || continue
+    probe_l=$(printf 'fm-x.test.sh\nfm-x-y.test.sh\n' | LC_ALL="$loc" sort 2>/dev/null)
+    if [ -n "$probe_l" ] && [ "$probe_l" != "$probe_c" ]; then
+      diverging=$loc
+      break
+    fi
+  done < <(locale -a 2>/dev/null | grep -iE 'utf-?8')
+
+  # Refuse a vacuous pass: without a diverging locale this case proves nothing.
+  [ -n "$diverging" ] \
+    || fail "no UTF-8 locale on this system collates differently from C; the coverage guard's locale contract cannot be exercised here"
+
+  # Assert the divergence itself, so the case cannot go quietly vacuous.
+  [ "$(printf 'fm-x.test.sh\nfm-x-y.test.sh\n' | LC_ALL="$diverging" sort)" != "$probe_c" ] \
+    || fail "locale $diverging was selected as diverging but collates like C"
+
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-locale.XXXXXX")
+  status=0
+  out=$(LC_ALL="$diverging" "$RUNNER" --check-coverage 2>"$tmp/err") || status=$?
+  err=$(cat "$tmp/err")
+  rm -rf "$tmp"
+
+  [ "$status" -eq 0 ] \
+    || fail "--check-coverage must succeed under $diverging, exited $status: $err"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker under $diverging"
+  # comm's own failures are masked by `|| true`, so stderr is the real signal.
+  [ -z "$err" ] \
+    || fail "--check-coverage must be silent on stderr under $diverging, got: $err"
+  pass "coverage guard passes under a dictionary-collation locale ($diverging)"
 }
 
 test_portable_serial_shards_partition_the_serial_lane() {
@@ -681,6 +723,7 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_survives_a_dictionary_collation_locale
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
