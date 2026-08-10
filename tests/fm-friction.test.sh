@@ -395,6 +395,55 @@ test_cancelled_draft_returns_to_surfaced() {
   pass "a cancelled draft returns the signature to surfaced, not to dismissed"
 }
 
+test_draft_refuses_dismiss_and_never_borrows_guard_wording() {
+  local home rc out before after
+  home=$(make_home draft-dismiss)
+  task_project "$home" task-a lobbyn
+  task_project "$home" task-b lobbyn
+  status_append "$home" task-a "friction: [sig=issue-scope-understated] scope understated"
+  status_append "$home" task-b "friction: [sig=issue-scope-understated] scope understated again"
+
+  before=$(fr "$home" show issue-scope-understated)
+
+  # `dismiss` is an available DECISION but composes no issue, so it must not be
+  # a draftable outcome. Accepting it here reached the drafting branch that
+  # words a guard narrowing, and stamped a non-guard signature with "This guard
+  # stays ... must never remove or disable it" plus a filed-issue URL.
+  set +e
+  out=$(fr "$home" draft issue-scope-understated --outcome dismiss 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "draft --outcome dismiss must be refused for an ordinary signature"
+  assert_not_contains "$out" "This guard stays" \
+    "a refused dismiss must never emit the guard-narrowing body"
+  assert_not_contains "$out" "narrow issue-scope-understated" \
+    "a refused dismiss must never emit the guard-narrowing title"
+
+  # The refusal must leave the record exactly as it found it. Compared whole
+  # rather than field by field, so a refusal that quietly advanced the state or
+  # stored a draft cannot slip past an assertion that named the wrong field.
+  after=$(fr "$home" show issue-scope-understated)
+  [ "$before" = "$after" ] \
+    || fail "a refused draft must not alter the record"$'\n'"--- before ---"$'\n'"$before"$'\n'"--- after ---"$'\n'"$after"
+  printf '%s' "$after" | jq -e '.draft == null and .eligible == true and .surfaced == true' >/dev/null \
+    || fail "a refused draft must leave the signature eligible and surfaced with no draft: $after"
+  [ "$(counts "$home")" = "1 0 0 0" ] \
+    || fail "a refused draft must not move the counts, got: $(counts "$home")"
+
+  # The two sets differ by exactly `dismiss`: it stays an offered decision.
+  fr "$home" list --json | jq -e '
+    (.records[] | select(.sig == "issue-scope-understated"))
+    | (.outcomes == ["clear","keep","dismiss"]) and (.draftable == ["clear","keep"])
+  ' >/dev/null || fail "dismiss must remain an offered outcome while never being draftable: $(fr "$home" list --json | jq -c '.records[]|select(.sig=="issue-scope-understated")|{outcomes,draftable}')"
+
+  # And the separate act still works, so the refusal removed no capability.
+  fr "$home" dismiss issue-scope-understated >/dev/null \
+    || fail "the dismiss command itself must still settle the signature"
+  fr "$home" show issue-scope-understated | jq -e '.state == "dismissed"' >/dev/null \
+    || fail "dismiss must settle the signature it refused to draft"
+  pass "dismiss is refused as a draft, keeps its own command, and never borrows guard wording"
+}
+
 test_cancel_without_a_pending_draft_is_refused() {
   local home rc
   home=$(make_home cancel-no-draft)
@@ -1335,6 +1384,7 @@ test_guard_signature_surfaces_individually_with_its_caveat
 test_guard_classification_survives_the_slugs_spelling
 test_bearings_never_batches_a_guard_into_the_ranked_list
 test_cancelled_draft_returns_to_surfaced
+test_draft_refuses_dismiss_and_never_borrows_guard_wording
 test_cancel_without_a_pending_draft_is_refused
 test_settled_signature_cannot_be_redrafted
 test_settled_signature_keeps_counting_and_never_resurfaces

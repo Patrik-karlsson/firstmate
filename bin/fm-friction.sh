@@ -120,7 +120,10 @@
 # through gh-axi; `cancel` returns the signature to `surfaced` - rejecting a
 # draft rejects the wording, not the finding, so it requires a draft to reject
 # and refuses a signature that has none. `dismiss` is the separate,
-# explicit act for a signature that is not a real pattern. A kept or dismissed
+# explicit act for a signature that is not a real pattern.
+# A record therefore carries two related sets: `outcomes` is what the captain
+# may decide, and `draftable` is the subset `draft` can compose. They differ by
+# exactly `dismiss`, which files nothing and so is never drafted. A kept or dismissed
 # signature keeps counting and never re-surfaces, so friction that was accepted
 # once and later became severe is still visible on inspection - visible, not
 # re-triageable: `draft` refuses a settled signature, because drafting one and
@@ -486,6 +489,12 @@ merged_model() {  # <now>
                        elif $security then ["keep", "narrow"]
                        else ["clear", "keep", "dismiss"] end)
           }
+        # What the captain may DECIDE and what `draft` may COMPOSE are not the
+        # same set, and conflating them is what let a non-guard signature be
+        # drafted with the guard-narrowing wording. They differ by exactly
+        # `dismiss`: it is its own command and produces no issue at all. Derived
+        # from .outcomes rather than restated, so the two cannot drift apart.
+        | . + { draftable: [ .outcomes[] | select(. != "dismiss") ] }
         | . + { surfaced: (.sig != $unclassified and .above_threshold and .eligible) } ]
     | . as $records
     | ($records | sort_by([(if .surfaced then 0 else 1 end), -(.tasks | length), .sig])) as $ordered
@@ -669,20 +678,27 @@ compose_draft() {  # <record-json> <outcome> <now>
     --arg outcome "$outcome" \
     --arg now "$now" '
     . as $r
+    # Every branch is named. A catch-all `else` here is what silently gave a
+    # non-guard signature the guard-narrowing title and body, so an unrecognised
+    # outcome fails the draft instead of borrowing the wording of another one.
     | (if $outcome == "clear" then
          "friction: \($r.sig) impedes work across \($r.tasks | length) tasks"
        elif $outcome == "keep" then
          "known friction: \($r.sig) stays, and what it costs"
-       else
+       elif $outcome == "narrow" then
          "narrow \($r.sig) to cut false positives"
+       else
+         error("compose_draft: \($outcome) is not a draftable outcome")
        end) as $title
     | (if $outcome == "keep" then ["known-friction"] else ["friction"] end) as $labels
     | (if $outcome == "clear" then
          "This friction should go. Firstmate proposes removing or fixing the cause."
        elif $outcome == "keep" then
          "This friction is intentional. This issue records why it stays and what it costs, so the decision is not re-litigated the next time a worker trips over it."
-       else
+       elif $outcome == "narrow" then
          "This guard stays. This issue proposes tightening it to cut a false positive, and must never remove or disable it."
+       else
+         error("compose_draft: \($outcome) is not a draftable outcome")
        end) as $intent
     | ([ "## What repeats",
          "",
@@ -791,9 +807,17 @@ case "$cmd" in
       || die "$SIG is already settled ($(printf '%s' "$REC" | jq -r '.state')); a settled signature keeps counting and never re-enters triage"
     printf '%s' "$REC" | jq -e '.above_threshold' >/dev/null \
       || die "$SIG is below the recurrence threshold ($FM_FRICTION_THRESHOLD distinct tasks); it is recorded, not surfaced"
-    printf '%s' "$REC" | jq -e --arg o "$OUTCOME" '.outcomes | index($o)' >/dev/null \
-      || die "$OUTCOME is not an available outcome for $SIG (available: $(printf '%s' "$REC" | jq -r '.outcomes | join(", ")'))"
-    DRAFT=$(compose_draft "$REC" "$OUTCOME" "$(now_ts)")
+    # Validated against .draftable, NOT .outcomes: `dismiss` is an available
+    # decision but not a draftable one, and accepting it here reached
+    # compose_draft's remaining branch, which is the guard-narrowing wording.
+    if ! printf '%s' "$REC" | jq -e --arg o "$OUTCOME" '.draftable | index($o)' >/dev/null; then
+      if [ "$OUTCOME" = dismiss ] && printf '%s' "$REC" | jq -e '.outcomes | index("dismiss")' >/dev/null; then
+        die "dismiss composes no issue; it is the separate act for a signature that is not a real pattern - run: fm-friction.sh dismiss $SIG"
+      fi
+      die "$OUTCOME is not a draftable outcome for $SIG (draftable: $(printf '%s' "$REC" | jq -r '.draftable | join(", ")'))"
+    fi
+    DRAFT=$(compose_draft "$REC" "$OUTCOME" "$(now_ts)") \
+      || die "could not compose a draft for $SIG with outcome $OUTCOME"
     # The draft embeds one bullet per retained observation, and observations for
     # a task whose log is still live are deliberately never evicted, so this blob
     # is unbounded while the reporting tasks run. --slurpfile past a process
@@ -823,8 +847,9 @@ case "$cmd" in
     # narrow is the clear-family outcome for a guard: the friction is reduced,
     # the guard stays. The exact outcome is retained on the record.
     case "$OUTCOME" in
-      keep) NEWSTATE=kept ;;
-      *)    NEWSTATE=cleared ;;
+      keep)         NEWSTATE=kept ;;
+      clear|narrow) NEWSTATE=cleared ;;
+      *)            die "$SIG carries a drafted outcome this version cannot settle ($OUTCOME); leaving the record untouched" ;;
     esac
     # shellcheck disable=SC2016 # $s/$o/$u are jq variables bound by --arg, not shell ones.
     update_record "$SIG" '.state = $s | .outcome = $o | .issue_url = $u | .draft = null' \
