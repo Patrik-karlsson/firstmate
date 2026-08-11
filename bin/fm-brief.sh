@@ -11,11 +11,6 @@
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
-#   Because data/ is private to the home, that report never reaches the project it
-#   is about, so the scout contract also requires a "Repo contradictions" section
-#   inventorying every committed project file the findings make wrong, or whose open
-#   question they answer, with file:line - or stating that there are none. The
-#   decision-hold-lifecycle completion gate is what checks that inventory was acted on.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -32,6 +27,14 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
+# A scout report, and the detailed-answer doc a secondmate charter commissions for an
+# investigation, both live under the home's private data/, so neither ever reaches the
+# project it is about. Both contracts therefore require a named "Repo contradictions"
+# section inventorying every committed project file the findings make wrong, or whose
+# open question they answer, with file:line - or stating that there are none. Ship
+# briefs carry no such section: a ship task delivers its change into the repo directly,
+# so it has no private report that could strand a contradiction.
+# The decision-hold-lifecycle completion gate is what checks that inventory was acted on.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
