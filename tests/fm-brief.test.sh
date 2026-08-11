@@ -174,6 +174,13 @@ test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-brief.sh" --help)
   assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
+  # usage() derives --help from the leading comment header, which is why the
+  # contradiction-inventory obligation was documented there rather than in a
+  # separate usage string. The terminator assertion only proves the header is
+  # not truncated; it would still pass if that obligation left the header
+  # entirely, so pin the obligation on the public --help surface itself.
+  assert_contains "$help" 'a named "Repo contradictions"' \
+    "fm-brief.sh --help stopped documenting the repo-contradiction inventory obligation"
   pass "fm-brief.sh: --help renders the complete header"
 }
 

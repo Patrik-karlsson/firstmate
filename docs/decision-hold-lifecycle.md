@@ -44,11 +44,13 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Repo-contradiction scaffold-obligation verification date: 2026-08-11.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+A colocated brief regression proves the scout and secondmate scaffolds carry the `Repo contradictions` inventory obligation while the ship scaffold does not.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -77,6 +79,7 @@ ok - main and secondmate captain actionability use the same blocker readiness
 
 $ bash tests/fm-brief.test.sh
 ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
+ok - fm-brief.sh: scout and secondmate investigation docs require the repo-contradiction inventory, ship does not
 
 $ bash tests/fm-teardown.test.sh
 all teardown safety cases passed
