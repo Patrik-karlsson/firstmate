@@ -11,6 +11,11 @@
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   Because data/ is private to the home, that report never reaches the project it
+#   is about, so the scout contract also requires a "Repo contradictions" section
+#   inventorying every committed project file the findings make wrong, or whose open
+#   question they answer, with file:line - or stating that there are none. The
+#   decision-hold-lifecycle completion gate is what checks that inventory was acted on.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -356,6 +361,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+The report must also carry a section named \`Repo contradictions\` inventorying every committed project file the findings make wrong, or whose open question they answer, each with a \`file:line\` reference - or stating explicitly that there are none.
+Write that section even when it is empty: an absent section is indistinguishable from an unperformed inventory.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
