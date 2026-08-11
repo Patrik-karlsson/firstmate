@@ -737,18 +737,21 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
-# A scout report lives under the home's gitignored data/, so it is unreachable from
-# any clone of the project it is about. The scout contract therefore has to make the
-# outward-facing consequences of the findings explicit in the report itself, and the
-# obligation belongs to scouts alone: a ship task delivers its change into the repo
-# directly, and a charter is not an investigation deliverable.
-test_scout_report_must_inventory_repo_contradictions() {
-  local home scout ship charter
+# An investigation doc lives under the home's gitignored data/, so it is unreachable
+# from any clone of the project it is about. Every scaffold that commissions one - the
+# scout contract and the secondmate charter alike - therefore has to make the
+# outward-facing consequences of the findings explicit in the doc itself. A ship task
+# is the exception: it delivers its change into the repo directly, so it has no private
+# report that could strand a contradiction.
+test_investigation_scaffolds_must_inventory_repo_contradictions() {
+  local home scout ship charter status
   home="$TMP_ROOT/repo-contradiction-home"
   mkdir -p "$home/data"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-brief.sh" contradiction-scout sample --scout >/dev/null 2>&1
+    "$ROOT/bin/fm-brief.sh" contradiction-scout sample --scout >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh --scout should exit 0"
   scout="$home/data/contradiction-scout/brief.md"
+  assert_present "$scout" "scout brief was not scaffolded"
   # shellcheck disable=SC2016 # The literal backticked section name must not expand.
   assert_grep 'section named `Repo contradictions`' "$scout" \
     "scout brief did not name the outward-facing contradiction inventory"
@@ -757,18 +760,27 @@ test_scout_report_must_inventory_repo_contradictions() {
   assert_grep "or stating explicitly that there are none" "$scout" \
     "scout brief did not make an empty inventory an explicit statement"
 
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-brief.sh" contradiction-ship sample --mode no-mistakes >/dev/null 2>&1
-  ship="$home/data/contradiction-ship/brief.md"
-  assert_no_grep "Repo contradictions" "$ship" \
-    "ship brief gained the scout-only contradiction inventory"
-
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample domain' \
-    "$ROOT/bin/fm-brief.sh" contradiction-mate --secondmate --no-projects >/dev/null 2>&1
+    "$ROOT/bin/fm-brief.sh" contradiction-mate --secondmate --no-projects >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh --secondmate should exit 0"
   charter="$home/data/contradiction-mate/brief.md"
-  assert_no_grep "Repo contradictions" "$charter" \
-    "secondmate charter gained the scout-only contradiction inventory"
-  pass "fm-brief.sh: only the scout contract requires the repo-contradiction inventory"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  # shellcheck disable=SC2016 # The literal backticked section name must not expand.
+  assert_grep 'section named `Repo contradictions`' "$charter" \
+    "secondmate charter did not name the outward-facing contradiction inventory"
+  assert_grep "whose open question they answer" "$charter" \
+    "secondmate charter did not require answered open questions in the inventory"
+  assert_grep "or stating explicitly that there are none" "$charter" \
+    "secondmate charter did not make an empty inventory an explicit statement"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" contradiction-ship sample --mode no-mistakes >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh --mode no-mistakes should exit 0"
+  ship="$home/data/contradiction-ship/brief.md"
+  assert_present "$ship" "ship brief was not scaffolded"
+  assert_no_grep "Repo contradictions" "$ship" \
+    "ship brief gained the investigation-only contradiction inventory"
+  pass "fm-brief.sh: scout and secondmate investigation docs require the repo-contradiction inventory, ship does not"
 }
 
 # Scout and secondmate paths still scaffold well-formed briefs.
@@ -811,5 +823,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_friction_verb_is_taught_in_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
-test_scout_report_must_inventory_repo_contradictions
+test_investigation_scaffolds_must_inventory_repo_contradictions
 test_scout_and_secondmate_scaffold

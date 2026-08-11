@@ -241,6 +241,8 @@ Marked requests also carry a privacy-safe \`corr=<id>\` token after the marker; 
 Optional helper: \`bin/fm-secondmate-report.sh\` can append a correlated status line for you, but a plain \`echo\` that includes the same \`corr=<id>\` is equally valid - do not depend on the helper being present.
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
+That doc must also carry a section named \`Repo contradictions\` inventorying every committed project file the findings make wrong, or whose open question they answer, each with a \`file:line\` reference - or stating explicitly that there are none.
+Write that section even when it is empty: an absent section is indistinguishable from an unperformed inventory.
 Before treating an investigation or visual review as complete, load \`decision-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
 A message with NO marker is the captain typing directly into your pane: treat it as authoritative captain intervention and stay conversational exactly as you would for any captain message; do not force it onto the status path.
 
