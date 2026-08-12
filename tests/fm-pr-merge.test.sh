@@ -25,10 +25,12 @@
 #   (m) an unreadable check state refuses rather than merging blind
 #   (n) --checks-override merges a failing PR and records the classification
 #   (o) neither a yolo posture nor an environment variable reaches the override
-#   (p) --checks-override refuses an unknown or missing classification
+#   (p) --checks-override refuses an unknown, missing, or empty classification
 #   (q) --checks-override is refused when the check state is already clean
 #   (r) a repeated override replaces the recorded classification, and a later
 #       merge that needs none clears it
+#   (s) the meta an override merge leaves behind is still accepted by the
+#       readers of the task's PR identity and armed merge watch
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -625,8 +627,57 @@ test_override_requires_a_known_classification() {
   assert_grep 'needs a classification' "$case_dir/stderr" \
     "checks-override-invalid: the refusal did not report the missing classification"
 
+  # An empty value carries no judgment in either spelling - a wrapper expanding
+  # an unset variable reaches both - and may not degrade to "no override given".
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_FAILING" task-x1 \
+    https://github.com/example/repo/pull/39 --checks-override= || rc=$?
+  expect_code 2 "$rc" "checks-override-invalid: an empty joined classification should be refused"
+  assert_grep 'needs a classification' "$case_dir/stderr" \
+    "checks-override-invalid: --checks-override= was read as no override rather than a missing classification"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_FAILING" task-x1 \
+    https://github.com/example/repo/pull/39 --checks-override '' || rc=$?
+  expect_code 2 "$rc" "checks-override-invalid: an empty separate classification should be refused"
+  assert_grep 'needs a classification' "$case_dir/stderr" \
+    "checks-override-invalid: an empty --checks-override operand was read as no override rather than a missing classification"
+
   assert_no_merge_side_effects "$case_dir" checks-override-invalid
   pass "fm-pr-merge refuses an override that carries no usable classification"
+}
+
+test_override_meta_still_parses_for_its_consumers() {
+  local case_dir rc
+  case_dir=$(make_case checks-override-meta)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_FAILING" task-x1 \
+    https://github.com/example/repo/pull/43 --checks-override INFRASTRUCTURE || rc=$?
+  expect_code 0 "$rc" "checks-override-meta: the override merge should succeed"
+  assert_grep 'checks_override=INFRASTRUCTURE' "$case_dir/state/task-x1.meta" \
+    "checks-override-meta: the classification was not recorded to begin with"
+
+  # Recording the decision may not cost the task its PR identity. The meta is
+  # read back by fm_pr_metadata_identity_parse, which allows only a fixed set of
+  # keys after the canonical pr= line, and fm-watch reaches the armed merge watch
+  # through fm_pr_poll_artifacts_valid on every check interval - so a meta those
+  # refuse strands the very merge the captain authorized. Run in a subshell so
+  # the library's FM_PR_* globals stay out of the harness.
+  rc=0
+  (
+    # shellcheck source=bin/fm-pr-lib.sh
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_metadata_identity_parse "$case_dir/state/task-x1.meta" || exit 1
+    [ "$FM_PR_META_URL" = https://github.com/example/repo/pull/43 ] || exit 1
+    fm_pr_poll_artifacts_valid "$case_dir/state" task-x1 "$ROOT/bin/fm-pr-poll.sh" || exit 2
+  ) || rc=$?
+  expect_code 0 "$rc" \
+    "checks-override-meta: the meta left by an override merge is refused by its own readers"
+  pass "the meta an override merge leaves behind still parses for its consumers"
 }
 
 test_override_refused_when_checks_are_clean() {
@@ -676,6 +727,7 @@ if command -v jq >/dev/null 2>&1; then
   test_yolo_and_environment_do_not_reach_the_override
   test_override_requires_a_known_classification
   test_override_refused_when_checks_are_clean
+  test_override_meta_still_parses_for_its_consumers
 else
   echo "skip: jq not found; check-state preflight cases skipped"
 fi

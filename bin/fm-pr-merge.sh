@@ -66,6 +66,7 @@ PR_NUMBER=$FM_PR_NUMBER
 shift 2
 
 CHECKS_OVERRIDE=
+CHECKS_OVERRIDE_GIVEN=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --checks-override)
@@ -74,10 +75,12 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       CHECKS_OVERRIDE=$2
+      CHECKS_OVERRIDE_GIVEN=1
       shift 2
       ;;
     --checks-override=*)
       CHECKS_OVERRIDE=${1#--checks-override=}
+      CHECKS_OVERRIDE_GIVEN=1
       shift
       ;;
     --)
@@ -87,6 +90,13 @@ while [ "$#" -gt 0 ]; do
     *) break ;;
   esac
 done
+
+# An empty value carries no judgment whichever spelling supplied it, so the
+# emptiness check has one owner here rather than one guard per spelling.
+if [ -n "$CHECKS_OVERRIDE_GIVEN" ] && [ -z "$CHECKS_OVERRIDE" ]; then
+  echo "error: --checks-override needs a classification" >&2
+  exit 2
+fi
 
 case "$CHECKS_OVERRIDE" in
   ''|CHANGE|FLAKE|INFRASTRUCTURE) ;;
@@ -233,17 +243,29 @@ if [ -n "$CHECKS_OVERRIDE" ] || grep -q '^checks_override=' "$META"; then
   trap 'exit 1' HUP INT TERM
   META_TMP=$(mktemp "$STATE/.fm-pr-merge-meta.XXXXXX") || exit 1
   chmod 0600 "$META_TMP" || exit 1
-  grep -v '^checks_override=' "$META" > "$META_TMP" || true
-  if [ ! -s "$META_TMP" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      checks_override=*) ;;
+      pr=*)
+        if [ -n "$CHECKS_OVERRIDE" ]; then
+          printf 'checks_override=%s\n' "$CHECKS_OVERRIDE" >> "$META_TMP" || exit 1
+        fi
+        printf '%s\n' "$line" >> "$META_TMP" || exit 1
+        ;;
+      *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
+    esac
+  done < "$META"
+  fm_pr_metadata_identity_parse "$META_TMP" || {
     echo "error: task metadata is unavailable" >&2
     exit 1
-  fi
-  if [ -n "$CHECKS_OVERRIDE" ]; then
-    printf 'checks_override=%s\n' "$CHECKS_OVERRIDE" >> "$META_TMP" || exit 1
-  fi
+  }
   fm_pr_regular_destination_or_absent "$META" || exit 1
   mv -f -- "$META_TMP" "$META" || exit 1
   META_TMP=
+  fm_pr_metadata_identity_parse "$META" || {
+    echo "error: task metadata is unavailable" >&2
+    exit 1
+  }
   if [ -n "$CHECKS_OVERRIDE" ]; then
     grep -qxF "checks_override=$CHECKS_OVERRIDE" "$META" || {
       echo "error: check override recording failed" >&2
