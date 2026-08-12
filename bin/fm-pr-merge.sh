@@ -222,8 +222,10 @@ grep -qxF "pr=$URL" "$META" || {
 
 # Recorded after fm-pr-check.sh, which rewrites the meta wholesale. Any earlier
 # line is dropped so a re-run replaces the classification rather than stacking a
-# second one behind it.
-if [ -n "$CHECKS_OVERRIDE" ]; then
+# second one behind it, and a later merge that needed no override clears it
+# rather than leaving a stale record claiming an authorization this merge never
+# used. The common clean merge touches nothing.
+if [ -n "$CHECKS_OVERRIDE" ] || grep -q '^checks_override=' "$META"; then
   META_TMP=
   # shellcheck disable=SC2329 # Registered by the traps below.
   merge_meta_cleanup() { [ -z "$META_TMP" ] || rm -f -- "$META_TMP"; }
@@ -236,14 +238,21 @@ if [ -n "$CHECKS_OVERRIDE" ]; then
     echo "error: task metadata is unavailable" >&2
     exit 1
   fi
-  printf 'checks_override=%s\n' "$CHECKS_OVERRIDE" >> "$META_TMP" || exit 1
+  if [ -n "$CHECKS_OVERRIDE" ]; then
+    printf 'checks_override=%s\n' "$CHECKS_OVERRIDE" >> "$META_TMP" || exit 1
+  fi
   fm_pr_regular_destination_or_absent "$META" || exit 1
   mv -f -- "$META_TMP" "$META" || exit 1
   META_TMP=
-  grep -qxF "checks_override=$CHECKS_OVERRIDE" "$META" || {
-    echo "error: check override recording failed" >&2
+  if [ -n "$CHECKS_OVERRIDE" ]; then
+    grep -qxF "checks_override=$CHECKS_OVERRIDE" "$META" || {
+      echo "error: check override recording failed" >&2
+      exit 1
+    }
+  elif grep -q '^checks_override=' "$META"; then
+    echo "error: superseded check override could not be cleared" >&2
     exit 1
-  }
+  fi
 fi
 
 merge_args=()

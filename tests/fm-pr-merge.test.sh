@@ -27,7 +27,8 @@
 #   (o) neither a yolo posture nor an environment variable reaches the override
 #   (p) --checks-override refuses an unknown or missing classification
 #   (q) --checks-override is refused when the check state is already clean
-#   (r) a repeated override replaces the recorded classification
+#   (r) a repeated override replaces the recorded classification, and a later
+#       merge that needs none clears it
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -543,6 +544,31 @@ test_override_replaces_a_previous_classification() {
   pass "fm-pr-merge replaces a recorded classification instead of stacking a second one"
 }
 
+test_clean_merge_clears_a_superseded_override() {
+  local case_dir rc
+  case_dir=$(make_case checks-override-cleared)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" babababababababababababababababababababa
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_FAILING" task-x1 \
+    https://github.com/example/repo/pull/42 --checks-override FLAKE || rc=$?
+  expect_code 0 "$rc" "checks-override-cleared: the override merge should succeed"
+  assert_grep 'checks_override=FLAKE' "$case_dir/state/task-x1.meta" \
+    "checks-override-cleared: the classification was not recorded to begin with"
+
+  # The check later goes green and the merge is re-run with no override. The
+  # earlier classification described an authorization this merge never used.
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_PASSING" task-x1 \
+    https://github.com/example/repo/pull/42 || rc=$?
+  expect_code 0 "$rc" "checks-override-cleared: the later clean merge should succeed"
+  assert_no_grep 'checks_override=' "$case_dir/state/task-x1.meta" \
+    "checks-override-cleared: a merge that needed no override left the old classification behind"
+  pass "a merge that needed no override clears a superseded classification"
+}
+
 test_yolo_and_environment_do_not_reach_the_override() {
   local case_dir rc
   case_dir=$(make_case checks-yolo)
@@ -646,6 +672,7 @@ if command -v jq >/dev/null 2>&1; then
   test_unreadable_check_state_refuses
   test_override_merges_failing_pr_and_records_classification
   test_override_replaces_a_previous_classification
+  test_clean_merge_clears_a_superseded_override
   test_yolo_and_environment_do_not_reach_the_override
   test_override_requires_a_known_classification
   test_override_refused_when_checks_are_clean
