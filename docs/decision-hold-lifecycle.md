@@ -6,6 +6,7 @@ This document records the deterministic mechanism, structured surfaces, and priv
 ## Mechanism
 
 `bin/fm-decision-hold.sh` is the only lifecycle command for an investigation or visual review's unresolved captain decisions.
+The skill's second inventory class, the findings that contradict a project's committed material, has no counterpart here and is agent-attested only; nothing in this mechanism observes or enforces it.
 The command runs tasks-axi in the active `FM_HOME`, so the existing backlog remains the only durable work database and a secondmate-owned decision stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
@@ -43,11 +44,13 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Repo-contradiction scaffold-obligation verification date: 2026-08-11.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+A colocated brief regression proves the scout and secondmate scaffolds carry the `Repo contradictions` inventory obligation while the ship scaffold does not.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -76,6 +79,7 @@ ok - main and secondmate captain actionability use the same blocker readiness
 
 $ bash tests/fm-brief.test.sh
 ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
+ok - fm-brief.sh: scout and secondmate investigation docs require the repo-contradiction inventory, ship does not
 
 $ bash tests/fm-teardown.test.sh
 all teardown safety cases passed

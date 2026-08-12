@@ -174,6 +174,13 @@ test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-brief.sh" --help)
   assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
+  # usage() derives --help from the leading comment header, which is why the
+  # contradiction-inventory obligation was documented there rather than in a
+  # separate usage string. The terminator assertion only proves the header is
+  # not truncated; it would still pass if that obligation left the header
+  # entirely, so pin the obligation on the public --help surface itself.
+  assert_contains "$help" 'a named "Repo contradictions"' \
+    "fm-brief.sh --help stopped documenting the repo-contradiction inventory obligation"
   pass "fm-brief.sh: --help renders the complete header"
 }
 
@@ -737,6 +744,52 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# An investigation doc lives under the home's gitignored data/, so it is unreachable
+# from any clone of the project it is about. Every scaffold that commissions one - the
+# scout contract and the secondmate charter alike - therefore has to make the
+# outward-facing consequences of the findings explicit in the doc itself. A ship task
+# is the exception: it delivers its change into the repo directly, so it has no private
+# report that could strand a contradiction.
+test_investigation_scaffolds_must_inventory_repo_contradictions() {
+  local home scout ship charter status
+  home="$TMP_ROOT/repo-contradiction-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" contradiction-scout sample --scout >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh --scout should exit 0"
+  scout="$home/data/contradiction-scout/brief.md"
+  assert_present "$scout" "scout brief was not scaffolded"
+  # shellcheck disable=SC2016 # The literal backticked section name must not expand.
+  assert_grep 'section named `Repo contradictions`' "$scout" \
+    "scout brief did not name the outward-facing contradiction inventory"
+  assert_grep "whose open question they answer" "$scout" \
+    "scout brief did not require answered open questions in the inventory"
+  assert_grep "or stating explicitly that there are none" "$scout" \
+    "scout brief did not make an empty inventory an explicit statement"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample domain' \
+    "$ROOT/bin/fm-brief.sh" contradiction-mate --secondmate --no-projects >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh --secondmate should exit 0"
+  charter="$home/data/contradiction-mate/brief.md"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  # shellcheck disable=SC2016 # The literal backticked section name must not expand.
+  assert_grep 'section named `Repo contradictions`' "$charter" \
+    "secondmate charter did not name the outward-facing contradiction inventory"
+  assert_grep "whose open question they answer" "$charter" \
+    "secondmate charter did not require answered open questions in the inventory"
+  assert_grep "or stating explicitly that there are none" "$charter" \
+    "secondmate charter did not make an empty inventory an explicit statement"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" contradiction-ship sample --mode no-mistakes >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh --mode no-mistakes should exit 0"
+  ship="$home/data/contradiction-ship/brief.md"
+  assert_present "$ship" "ship brief was not scaffolded"
+  assert_no_grep "Repo contradictions" "$ship" \
+    "ship brief gained the investigation-only contradiction inventory"
+  pass "fm-brief.sh: scout and secondmate investigation docs require the repo-contradiction inventory, ship does not"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -777,4 +830,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_friction_verb_is_taught_in_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_investigation_scaffolds_must_inventory_repo_contradictions
 test_scout_and_secondmate_scaffold
