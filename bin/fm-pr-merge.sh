@@ -143,17 +143,22 @@ fi
 # tokens instead of prose a release could reword. The filter always emits a
 # state= line, which is what keeps an unreadable answer from being mistaken for
 # a repository that simply has no checks - empty output can only mean failure.
+# gh reports an unset rollup field as an empty string, not null, and jq's //
+# falls through only null and false. Every field fallback therefore goes through
+# `present`, which reads either spelling as the absent field it stands for, in
+# the verdict as well as the reported detail.
 # shellcheck disable=SC2016 # $s/$checks/$state are jq variables, not shell ones.
 CHECKS_FILTER='
-def verdict: (.conclusion // .state // "") as $s
+def present: map(select(. != null and . != "")) | .[0];
+def verdict: ([.conclusion, .state] | present) as $s
   | if ($s == "FAILURE" or $s == "ERROR" or $s == "TIMED_OUT" or $s == "CANCELLED"
         or $s == "ACTION_REQUIRED" or $s == "STARTUP_FAILURE") then "failing"
-    elif ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS") then "pending"
+    elif ([.status] | present) != "COMPLETED" and ([.state] | present) != "SUCCESS" then "pending"
     else "passing" end;
 if (.statusCheckRollup | type) != "array" then "state=unreadable" else
 [ .statusCheckRollup[]
-  | { name: (.name // .context // "unnamed"),
-      detail: (.conclusion // .state // .status // "unknown"),
+  | { name: ([.name, .context] | present // "unnamed"),
+      detail: ([.conclusion, .state, .status] | present // "unknown"),
       verdict: verdict } ] as $checks
 | (if ($checks | length) == 0 then "none"
    elif any($checks[]; .verdict == "failing") then "failing"
@@ -241,6 +246,12 @@ if [ -n "$CHECKS_OVERRIDE" ] || grep -q '^checks_override=' "$META"; then
   merge_meta_cleanup() { [ -z "$META_TMP" ] || rm -f -- "$META_TMP"; }
   trap merge_meta_cleanup EXIT
   trap 'exit 1' HUP INT TERM
+  META_DEVICE=$(fm_pr_file_device "$META") || exit 1
+  STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
+  [ "$META_DEVICE" = "$STATE_DEVICE" ] || {
+    echo "error: task metadata is unavailable" >&2
+    exit 1
+  }
   META_TMP=$(mktemp "$STATE/.fm-pr-merge-meta.XXXXXX") || exit 1
   chmod 0600 "$META_TMP" || exit 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -255,13 +266,15 @@ if [ -n "$CHECKS_OVERRIDE" ] || grep -q '^checks_override=' "$META"; then
       *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
     esac
   done < "$META"
+  fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
   fm_pr_metadata_identity_parse "$META_TMP" || {
     echo "error: task metadata is unavailable" >&2
     exit 1
   }
-  fm_pr_regular_destination_or_absent "$META" || exit 1
+  fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
   mv -f -- "$META_TMP" "$META" || exit 1
   META_TMP=
+  fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
   fm_pr_metadata_identity_parse "$META" || {
     echo "error: task metadata is unavailable" >&2
     exit 1

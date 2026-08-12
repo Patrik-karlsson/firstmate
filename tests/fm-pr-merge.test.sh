@@ -19,7 +19,9 @@
 # filter so the real filter runs over realistic rollup payloads):
 #   (i) failing checks refuse the merge and name the concrete check
 #       (including a workflow that was blocked or never started)
-#   (j) checks still running refuse the merge and name the concrete check
+#   (j) checks still running refuse the merge and name the concrete check,
+#       over gh's empty-string conclusion as well as a null one
+#   (j2) a failure carried in state= behind an empty conclusion reads as failing
 #   (k) a repository with no checks configured still merges
 #   (l) passing checks merge
 #   (m) an unreadable check state refuses rather than merging blind
@@ -343,9 +345,21 @@ test_parses_pr_url_for_gh_axi() {
 ROLLUP_FAILING='{"statusCheckRollup":[
   {"name":"lint","status":"COMPLETED","conclusion":"SUCCESS"},
   {"name":"build (ubuntu-latest)","status":"COMPLETED","conclusion":"FAILURE"}]}'
+# gh reports an unset conclusion as an empty string, not null, so the pending
+# payload carries the shape production actually sees. A JSON null is kept beside
+# it because the two are distinct inputs to the filter's field fallback.
 ROLLUP_PENDING='{"statusCheckRollup":[
   {"name":"lint","status":"COMPLETED","conclusion":"SUCCESS"},
+  {"name":"build (ubuntu-latest)","status":"IN_PROGRESS","conclusion":""}]}'
+ROLLUP_PENDING_NULL='{"statusCheckRollup":[
+  {"name":"lint","status":"COMPLETED","conclusion":"SUCCESS"},
   {"name":"build (ubuntu-latest)","status":"IN_PROGRESS","conclusion":null}]}'
+ROLLUP_PENDING_QUEUED='{"statusCheckRollup":[
+  {"name":"ci","status":"QUEUED","conclusion":""}]}'
+# A red status context that also carries gh's empty conclusion: the failure
+# lives in state=, which the field fallback must reach past the empty string.
+ROLLUP_CONTEXT_FAILING='{"statusCheckRollup":[
+  {"context":"codecov/patch","state":"FAILURE","conclusion":""}]}'
 ROLLUP_PASSING='{"statusCheckRollup":[
   {"name":"lint","status":"COMPLETED","conclusion":"SUCCESS"},
   {"context":"codecov/patch","state":"SUCCESS"}]}'
@@ -373,7 +387,7 @@ assert_no_merge_side_effects() {
   local case_dir=$1 label=$2
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "$label: gh-axi pr merge was invoked despite the refusal"
-  assert_no_grep '^pr=' "$case_dir/state/task-x1.meta" \
+  assert_no_grep 'pr=' "$case_dir/state/task-x1.meta" \
     "$label: the PR was recorded even though the merge was refused"
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "$label: a merge poll was armed even though the merge was refused"
@@ -440,7 +454,43 @@ test_pending_checks_refuse_and_name_the_check() {
   assert_grep 'wait for the check to finish' "$case_dir/stderr" \
     "checks-pending: the refusal did not recommend waiting"
   assert_no_merge_side_effects "$case_dir" checks-pending
+
+  # The same contract over the null spelling and over a check that has not
+  # started, so neither shape can lose its state behind the other.
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_PENDING_NULL" task-x1 \
+    https://github.com/example/repo/pull/32 || rc=$?
+  expect_code 1 "$rc" "checks-pending: a null conclusion should refuse the merge"
+  assert_grep 'build (ubuntu-latest) (IN_PROGRESS)' "$case_dir/stderr" \
+    "checks-pending: a null conclusion did not name the unfinished check's state"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_PENDING_QUEUED" task-x1 \
+    https://github.com/example/repo/pull/32 || rc=$?
+  expect_code 1 "$rc" "checks-pending: a queued check should refuse the merge"
+  assert_grep 'ci (QUEUED)' "$case_dir/stderr" \
+    "checks-pending: the refusal did not name the queued check's state"
   pass "fm-pr-merge refuses to merge mid-flight and names the unfinished check"
+}
+
+test_status_context_failure_survives_an_empty_conclusion() {
+  local case_dir rc
+  case_dir=$(make_case checks-context-failing)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_CONTEXT_FAILING" task-x1 \
+    https://github.com/example/repo/pull/44 || rc=$?
+
+  expect_code 1 "$rc" "checks-context-failing: a red status context should refuse the merge"
+  assert_grep "the PR's checks are failing" "$case_dir/stderr" \
+    "checks-context-failing: a failure carried in state= was not reported as failing"
+  assert_grep 'codecov/patch (FAILURE)' "$case_dir/stderr" \
+    "checks-context-failing: the refusal did not name the failing context's state"
+  assert_no_merge_side_effects "$case_dir" checks-context-failing
+  pass "a failing status context is reported as failing despite gh's empty conclusion"
 }
 
 test_no_checks_configured_still_merges() {
@@ -718,6 +768,7 @@ if command -v jq >/dev/null 2>&1; then
   test_failing_checks_refuse_and_name_the_check
   test_blocked_workflow_refuses_and_names_the_check
   test_pending_checks_refuse_and_name_the_check
+  test_status_context_failure_survives_an_empty_conclusion
   test_no_checks_configured_still_merges
   test_passing_checks_merge
   test_unreadable_check_state_refuses
