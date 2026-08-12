@@ -14,6 +14,20 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#
+# Check-state preflight matrix (needs jq, which stands in for gh's built-in
+# filter so the real filter runs over realistic rollup payloads):
+#   (i) failing checks refuse the merge and name the concrete check
+#       (including a workflow that was blocked or never started)
+#   (j) checks still running refuse the merge and name the concrete check
+#   (k) a repository with no checks configured still merges
+#   (l) passing checks merge
+#   (m) an unreadable check state refuses rather than merging blind
+#   (n) --checks-override merges a failing PR and records the classification
+#   (o) neither a yolo posture nor an environment variable reaches the override
+#   (p) --checks-override refuses an unknown or missing classification
+#   (q) --checks-override is refused when the check state is already clean
+#   (r) a repeated override replaces the recorded classification
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -53,10 +67,27 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *statusCheckRollup*)
+        # Answer the way gh does: run the caller's own filter, which is its last
+        # argument, over this case's rollup payload. FM_TEST_ROLLUP=UNAVAILABLE
+        # stands for a gh that cannot answer at all.
+        rollup=\${FM_TEST_ROLLUP:-'{"statusCheckRollup":[]}'}
+        [ "\$rollup" != UNAVAILABLE ] || exit 1
+        if command -v jq >/dev/null 2>&1; then
+          for filter in "\$@"; do :; done
+          printf '%s' "\$rollup" | jq -r "\$filter"
+        else
+          # No JSON processor: only the default empty-rollup payload is
+          # answerable, and the cases that need any other one are skipped.
+          printf 'state=none\n'
+        fi
+        exit 0
+        ;;
     esac
     ;;
 esac
@@ -69,6 +100,9 @@ SH
 # real merge failure is distinguishable from the recording step.
 add_gh_mocks_merge_fails() {
   local case_dir=$1
+  # Same gh mock as every other case, so the check-state preflight still gets a
+  # real answer and the merge is the only thing that fails.
+  add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -77,11 +111,7 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  cat > "$case_dir/fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  chmod +x "$case_dir/fakebin/gh-axi"
 }
 
 run_pr_merge() {
@@ -89,6 +119,8 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_ROLLUP="${FM_TEST_ROLLUP:-}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -301,6 +333,296 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+# --- check-state preflight ------------------------------------------------
+#
+# Rollup payloads shaped like the ones the forge really returns: a CheckRun
+# carries name/status/conclusion, a StatusContext carries context/state.
+ROLLUP_FAILING='{"statusCheckRollup":[
+  {"name":"lint","status":"COMPLETED","conclusion":"SUCCESS"},
+  {"name":"build (ubuntu-latest)","status":"COMPLETED","conclusion":"FAILURE"}]}'
+ROLLUP_PENDING='{"statusCheckRollup":[
+  {"name":"lint","status":"COMPLETED","conclusion":"SUCCESS"},
+  {"name":"build (ubuntu-latest)","status":"IN_PROGRESS","conclusion":null}]}'
+ROLLUP_PASSING='{"statusCheckRollup":[
+  {"name":"lint","status":"COMPLETED","conclusion":"SUCCESS"},
+  {"context":"codecov/patch","state":"SUCCESS"}]}'
+ROLLUP_NONE='{"statusCheckRollup":[]}'
+# A blocked or never-started workflow - the billing block that started this -
+# concludes without ever running the change's tests. It is not green and must
+# not read as one.
+ROLLUP_BLOCKED='{"statusCheckRollup":[
+  {"name":"ci","status":"COMPLETED","conclusion":"ACTION_REQUIRED"},
+  {"name":"release","status":"COMPLETED","conclusion":"STARTUP_FAILURE"}]}'
+
+# Run one preflight case. Args: case_dir rollup then fm-pr-merge args.
+run_with_rollup() {
+  local case_dir=$1 rollup=$2 rc; shift 2
+  set +e
+  FM_TEST_ROLLUP="$rollup" run_pr_merge "$case_dir" "$@" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  return "$rc"
+}
+
+# Nothing may have happened: no merge, no recorded PR, no armed poll.
+assert_no_merge_side_effects() {
+  local case_dir=$1 label=$2
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "$label: gh-axi pr merge was invoked despite the refusal"
+  assert_no_grep '^pr=' "$case_dir/state/task-x1.meta" \
+    "$label: the PR was recorded even though the merge was refused"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "$label: a merge poll was armed even though the merge was refused"
+}
+
+test_failing_checks_refuse_and_name_the_check() {
+  local case_dir rc
+  case_dir=$(make_case checks-failing)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_FAILING" task-x1 \
+    https://github.com/example/repo/pull/31 || rc=$?
+
+  expect_code 1 "$rc" "checks-failing: a failing check should refuse the merge"
+  assert_grep "the PR's checks are failing" "$case_dir/stderr" \
+    "checks-failing: the refusal did not say the checks are failing"
+  assert_grep 'build (ubuntu-latest) (FAILURE)' "$case_dir/stderr" \
+    "checks-failing: the refusal did not name the concrete failing check"
+  assert_no_grep 'lint' "$case_dir/stderr" \
+    "checks-failing: the refusal listed a check that is passing"
+  assert_no_merge_side_effects "$case_dir" checks-failing
+  pass "fm-pr-merge refuses a failing PR and names the concrete failing check"
+}
+
+test_blocked_workflow_refuses_and_names_the_check() {
+  local case_dir rc
+  case_dir=$(make_case checks-blocked)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" afafafafafafafafafafafafafafafafafafafaf
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_BLOCKED" task-x1 \
+    https://github.com/example/repo/pull/41 || rc=$?
+
+  expect_code 1 "$rc" "checks-blocked: a workflow that never ran must not merge"
+  assert_grep 'ci (ACTION_REQUIRED)' "$case_dir/stderr" \
+    "checks-blocked: the refusal did not name the blocked workflow"
+  assert_grep 'release (STARTUP_FAILURE)' "$case_dir/stderr" \
+    "checks-blocked: the refusal did not name the workflow that failed to start"
+  assert_no_merge_side_effects "$case_dir" checks-blocked
+  pass "fm-pr-merge refuses a workflow that was blocked or never started"
+}
+
+test_pending_checks_refuse_and_name_the_check() {
+  local case_dir rc
+  case_dir=$(make_case checks-pending)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_PENDING" task-x1 \
+    https://github.com/example/repo/pull/32 || rc=$?
+
+  expect_code 1 "$rc" "checks-pending: an unfinished check should refuse the merge"
+  assert_grep "the PR's checks are still running" "$case_dir/stderr" \
+    "checks-pending: the refusal did not say the checks are still running"
+  assert_grep 'build (ubuntu-latest) (IN_PROGRESS)' "$case_dir/stderr" \
+    "checks-pending: the refusal did not name the concrete unfinished check"
+  assert_grep 'wait for the check to finish' "$case_dir/stderr" \
+    "checks-pending: the refusal did not recommend waiting"
+  assert_no_merge_side_effects "$case_dir" checks-pending
+  pass "fm-pr-merge refuses to merge mid-flight and names the unfinished check"
+}
+
+test_no_checks_configured_still_merges() {
+  local case_dir rc
+  case_dir=$(make_case checks-none)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_NONE" task-x1 \
+    https://github.com/example/repo/pull/33 || rc=$?
+
+  expect_code 0 "$rc" "checks-none: a repository with no checks should still merge"
+  assert_grep 'checks: none configured' "$case_dir/stdout" \
+    "checks-none: an empty rollup was not reported as no checks configured"
+  grep -qxF 'pr merge 33 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "checks-none: the merge did not run on a repository with no checks"
+  pass "fm-pr-merge still merges on a repository with no checks configured"
+}
+
+test_passing_checks_merge() {
+  local case_dir rc
+  case_dir=$(make_case checks-passing)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" dddddddddddddddddddddddddddddddddddddddd
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_PASSING" task-x1 \
+    https://github.com/example/repo/pull/34 || rc=$?
+
+  expect_code 0 "$rc" "checks-passing: passing checks should merge"
+  assert_grep 'checks: passing' "$case_dir/stdout" \
+    "checks-passing: a green rollup was not reported as passing"
+  assert_grep 'statusCheckRollup' "$case_dir/gh.log" \
+    "checks-passing: the check state was never actually read from the forge"
+  grep -qxF 'pr merge 34 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "checks-passing: the merge did not run"
+  pass "fm-pr-merge reads the check state from the forge and merges a green PR"
+}
+
+test_unreadable_check_state_refuses() {
+  local case_dir rc
+  case_dir=$(make_case checks-unavailable)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" UNAVAILABLE task-x1 \
+    https://github.com/example/repo/pull/35 || rc=$?
+
+  expect_code 1 "$rc" "checks-unavailable: an unreadable check state should refuse the merge"
+  assert_grep 'check state could not be read' "$case_dir/stderr" \
+    "checks-unavailable: the refusal did not say the check state was unreadable"
+  assert_no_merge_side_effects "$case_dir" checks-unavailable
+  pass "fm-pr-merge refuses rather than merging blind when the checks cannot be read"
+}
+
+test_override_merges_failing_pr_and_records_classification() {
+  local case_dir rc
+  case_dir=$(make_case checks-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" ffffffffffffffffffffffffffffffffffffffff
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_FAILING" task-x1 \
+    https://github.com/example/repo/pull/36 --checks-override INFRASTRUCTURE || rc=$?
+
+  expect_code 0 "$rc" "checks-override: an explicit override should merge a failing PR"
+  assert_grep 'checks_override=INFRASTRUCTURE' "$case_dir/state/task-x1.meta" \
+    "checks-override: the classification was not recorded in the task's meta"
+  grep -qxF 'pr merge 36 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "checks-override: the merge did not run under an explicit override"
+  assert_no_grep 'checks-override' "$case_dir/gh-axi.log" \
+    "checks-override: the override flag leaked through to gh-axi pr merge"
+  pass "fm-pr-merge merges a failing PR only under an explicit, recorded override"
+}
+
+test_override_replaces_a_previous_classification() {
+  local case_dir rc
+  case_dir=$(make_case checks-override-repeat)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" abababababababababababababababababababab
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_FAILING" task-x1 \
+    https://github.com/example/repo/pull/37 --checks-override FLAKE || rc=$?
+  expect_code 0 "$rc" "checks-override-repeat: the first override should merge"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_FAILING" task-x1 \
+    https://github.com/example/repo/pull/37 --checks-override=CHANGE || rc=$?
+  expect_code 0 "$rc" "checks-override-repeat: the second override should merge"
+
+  assert_grep 'checks_override=CHANGE' "$case_dir/state/task-x1.meta" \
+    "checks-override-repeat: the new classification was not recorded"
+  assert_no_grep 'checks_override=FLAKE' "$case_dir/state/task-x1.meta" \
+    "checks-override-repeat: the superseded classification was left behind"
+  pass "fm-pr-merge replaces a recorded classification instead of stacking a second one"
+}
+
+test_yolo_and_environment_do_not_reach_the_override() {
+  local case_dir rc
+  case_dir=$(make_case checks-yolo)
+  mkdir -p "$case_dir/wt"
+  # A yolo posture is exactly the standing authority that must not reach past a
+  # red check, and no environment variable may stand in for the flag either.
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=1"
+  add_gh_mocks "$case_dir" acacacacacacacacacacacacacacacacacacacac
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  set +e
+  FM_TEST_ROLLUP="$ROLLUP_FAILING" \
+  FM_CHECKS_OVERRIDE=INFRASTRUCTURE CHECKS_OVERRIDE=INFRASTRUCTURE \
+  FM_PR_MERGE_CHECKS_OVERRIDE=INFRASTRUCTURE \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/38 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "checks-yolo: a yolo posture must not merge a failing PR"
+  assert_grep "the PR's checks are failing" "$case_dir/stderr" \
+    "checks-yolo: the refusal did not report the failing checks"
+  assert_no_grep 'checks_override=' "$case_dir/state/task-x1.meta" \
+    "checks-yolo: an override was recorded without the explicit flag"
+  assert_no_merge_side_effects "$case_dir" checks-yolo
+  pass "neither a yolo posture nor an environment variable reaches the check override"
+}
+
+test_override_requires_a_known_classification() {
+  local case_dir rc
+  case_dir=$(make_case checks-override-invalid)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" adadadadadadadadadadadadadadadadadadadad
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_FAILING" task-x1 \
+    https://github.com/example/repo/pull/39 --checks-override MAYBE || rc=$?
+  expect_code 2 "$rc" "checks-override-invalid: an unknown classification should be refused"
+  assert_grep 'CHANGE, FLAKE, or INFRASTRUCTURE' "$case_dir/stderr" \
+    "checks-override-invalid: the refusal did not name the accepted classifications"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_FAILING" task-x1 \
+    https://github.com/example/repo/pull/39 --checks-override || rc=$?
+  expect_code 2 "$rc" "checks-override-invalid: a missing classification should be refused"
+  assert_grep 'needs a classification' "$case_dir/stderr" \
+    "checks-override-invalid: the refusal did not report the missing classification"
+
+  assert_no_merge_side_effects "$case_dir" checks-override-invalid
+  pass "fm-pr-merge refuses an override that carries no usable classification"
+}
+
+test_override_refused_when_checks_are_clean() {
+  local case_dir rc
+  case_dir=$(make_case checks-override-clean)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae
+  : > "$case_dir/gh-axi.log"
+
+  rc=0
+  run_with_rollup "$case_dir" "$ROLLUP_PASSING" task-x1 \
+    https://github.com/example/repo/pull/40 --checks-override FLAKE || rc=$?
+
+  expect_code 2 "$rc" "checks-override-clean: an override on a green PR should be refused"
+  assert_grep 'applies only to a check state that is not clean' "$case_dir/stderr" \
+    "checks-override-clean: the refusal did not explain why the override was rejected"
+  assert_no_grep 'checks_override=' "$case_dir/state/task-x1.meta" \
+    "checks-override-clean: a classification was recorded for a green PR"
+  assert_no_merge_side_effects "$case_dir" checks-override-clean
+  pass "fm-pr-merge refuses a classification for a check state that is already clean"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +633,22 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+
+# The preflight cases drive the real filter through jq, standing in for the one
+# gh runs. Without it only the default empty rollup is answerable, so they are
+# skipped rather than passing over a payload the mock could not evaluate.
+if command -v jq >/dev/null 2>&1; then
+  test_failing_checks_refuse_and_name_the_check
+  test_blocked_workflow_refuses_and_names_the_check
+  test_pending_checks_refuse_and_name_the_check
+  test_no_checks_configured_still_merges
+  test_passing_checks_merge
+  test_unreadable_check_state_refuses
+  test_override_merges_failing_pr_and_records_classification
+  test_override_replaces_a_previous_classification
+  test_yolo_and_environment_do_not_reach_the_override
+  test_override_requires_a_known_classification
+  test_override_refused_when_checks_are_clean
+else
+  echo "skip: jq not found; check-state preflight cases skipped"
+fi
