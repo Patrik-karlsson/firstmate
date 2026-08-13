@@ -66,6 +66,10 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  # The merge preflight's check-state read. These fixtures are about poll
+  # provenance rather than check states, so they answer as a repository with no
+  # checks configured; tests/fm-pr-merge.test.sh owns the check-state matrix.
+  *statusCheckRollup*) printf 'state=none\n' ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
