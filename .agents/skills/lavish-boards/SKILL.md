@@ -35,12 +35,15 @@ Work through these in order.
    bin/fm-procevent-lavish.sh arm <file>
    ```
 
-   `arm` registers the source and starts the poll, and the runner owns capture and re-arming from there.
+   `arm` registers the source, and the watcher's own reconcile cycle is what starts the poll and restarts it after each capture.
+   That runs on every normal watcher cycle, so a registered board returns to a live poll on its own and nobody has to reconcile it by hand.
+   Confirm a board is armed by its `.runner` record beside the registration and a live poll rather than by `arm`'s own success output, because a home whose watcher is not running never starts one.
    Never run `lavish-axi poll` yourself in a conversational turn, because it blocks and it destructively clears the captain's feedback.
    [`process-event-sources`](../process-event-sources/SKILL.md) owns the wake handling, the handled acknowledgement, and the loss limitation.
 4. **While the captain may be reading, do not publish.**
    If a card must change, say so in chat first and let them send or copy out.
-5. **When the captain answers, record the answer and remove its control in the same edit.**
+5. **When the captain answers, record the answer and remove or collapse that decision's option presentation in the same edit.**
+   Option presentation means its options table, choice list, or input control.
    [`decision-hold-lifecycle`](../decision-hold-lifecycle/SKILL.md) owns that rule.
 6. **After the captain closes a board, a bare call deliberately refuses to reopen it.**
    `lavish-axi <file> --reopen` restores a fresh responsive tab, and it is for when the captain asks for further review or something important needs their visual attention, never for reopening uninvited.
@@ -52,7 +55,7 @@ A session is a record.
 An artifact is published bytes.
 A tab holds a revision token.
 A session serves published bytes, so editing the file alone changes nothing for the captain, and a session can read `open` with nothing served.
-Diagnose with bare `lavish-axi` first: `pending_prompts: 0` means the feedback never left their browser.
+Diagnose with `lavish-axi` and no arguments first: `pending_prompts: 0` means the feedback never left their browser.
 
 **Bare `lavish-axi <file>` opens a new tab every time.**
 Three bare calls in one session left the captain with three stale tabs, and they reported the board as broken.
