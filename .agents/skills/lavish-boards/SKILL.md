@@ -35,14 +35,9 @@ Work through these in order.
    bin/fm-procevent-lavish.sh arm <file>
    ```
 
-   `arm` registers the source, and the watcher's own reconcile cycle is what starts the poll.
-   After an ordinary feedback capture the source stays registered, so the next watcher cycle starts a fresh runner and the board keeps listening without anyone intervening.
-   After a terminal result, meaning the review ended or the artifact is missing, the source retires and nothing restarts, which is correct because the review is over.
-   Confirm a board is armed by its registration, which `bin/fm-procevent.sh list` shows and which lasts until the source retires.
-   A missing `.runner` record is not evidence of an unarmed board, because that record exists only while a runner is actually polling.
-   A registration still showing no live owner after a watcher cycle means that home's watcher is not running, which is a watcher problem rather than a board problem.
    Never run `lavish-axi poll` yourself in a conversational turn, because it blocks and it destructively clears the captain's feedback.
-   [`process-event-sources`](../process-event-sources/SKILL.md) owns the wake handling, the handled acknowledgement, and the loss limitation.
+   `bin/fm-procevent-lavish.sh source-id <file>` prints the row key to look for, because `bin/fm-procevent.sh list` prints only that hashed id and never the artifact path.
+   [`process-event-sources`](../process-event-sources/SKILL.md) owns what happens after a capture, including restarts, retirement, what counts as terminal, the wake handling, the handled acknowledgement, and the loss limitation.
 4. **While the captain may be reading, do not publish.**
    If a card must change, say so in chat first and let them send or copy out.
 5. **When the captain answers, record the answer and remove or collapse that decision's option presentation in the same edit.**
