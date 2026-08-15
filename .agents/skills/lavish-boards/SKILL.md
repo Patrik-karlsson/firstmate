@@ -36,6 +36,7 @@ Work through these in order.
    ```
 
    Never run `lavish-axi poll` yourself in a conversational turn, because it blocks and it destructively clears the captain's feedback.
+   Confirm a board is armed by finding the source that `arm` registered in `bin/fm-procevent.sh list`.
    `bin/fm-procevent-lavish.sh source-id <file>` prints the row key to look for, because `bin/fm-procevent.sh list` prints only that hashed id and never the artifact path.
    That listing's last column is `PENDING`, and a `0` there is ordinary and says nothing about the captain's browser.
    [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns restarts, retirement, and what counts as terminal, and [`process-event-sources`](../process-event-sources/SKILL.md) owns the wake handling, the handled acknowledgement, and the loss limitation.
