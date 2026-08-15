@@ -37,7 +37,8 @@ Work through these in order.
 
    Never run `lavish-axi poll` yourself in a conversational turn, because it blocks and it destructively clears the captain's feedback.
    `bin/fm-procevent-lavish.sh source-id <file>` prints the row key to look for, because `bin/fm-procevent.sh list` prints only that hashed id and never the artifact path.
-   [`process-event-sources`](../process-event-sources/SKILL.md) owns what happens after a capture, including restarts, retirement, what counts as terminal, the wake handling, the handled acknowledgement, and the loss limitation.
+   That listing's last column is `PENDING`, and a `0` there is ordinary and says nothing about the captain's browser.
+   [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns restarts, retirement, and what counts as terminal, and [`process-event-sources`](../process-event-sources/SKILL.md) owns the wake handling, the handled acknowledgement, and the loss limitation.
 4. **While the captain may be reading, do not publish.**
    If a card must change, say so in chat first and let them send or copy out.
 5. **When the captain answers, record the answer and remove or collapse that decision's option presentation in the same edit.**
@@ -54,7 +55,7 @@ An artifact is published bytes.
 A tab holds a revision token.
 A session serves published bytes, so editing the file alone changes nothing for the captain, and a session can read `open` with nothing served.
 Diagnose by running `lavish-axi` with no arguments first, which lists every session as one row of `sessions[N]{file,status,url,pending_prompts}`.
-A trailing `0` on a board's row means that board's feedback never left the captain's browser.
+In that listing, a `pending_prompts` of `0` on a board's row means that board's feedback never left the captain's browser.
 
 **Bare `lavish-axi <file>` opens a new tab every time.**
 Three bare calls in one session left the captain with three stale tabs, and they reported the board as broken.
