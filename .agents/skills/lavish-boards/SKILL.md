@@ -56,7 +56,7 @@ An artifact is published bytes.
 A tab holds a revision token.
 A session serves published bytes, so editing the file alone changes nothing for the captain, and a session can read `open` with nothing served.
 Diagnose by running `lavish-axi` with no arguments first, which lists every session as one row of `sessions[N]{file,status,url,pending_prompts}`.
-In that listing, a `pending_prompts` of `0` on a board's row means that board's feedback never left the captain's browser.
+In that listing, a `pending_prompts` of `0` is normal on an armed board, because the runner that `arm` registered drains feedback on delivery, so a `0` there is not evidence about the captain's browser.
 
 **Bare `lavish-axi <file>` opens a new tab every time.**
 Three bare calls in one session left the captain with three stale tabs, and they reported the board as broken.
