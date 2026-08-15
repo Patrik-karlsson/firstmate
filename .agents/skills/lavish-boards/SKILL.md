@@ -43,7 +43,6 @@ Work through these in order.
 4. **While the captain may be reading, do not publish.**
    If a card must change, say so in chat first and let them send or copy out.
 5. **When the captain answers, record the answer and remove or collapse that decision's option presentation in the same edit.**
-   Option presentation means its options table, choice list, or input control.
    [`decision-hold-lifecycle`](../decision-hold-lifecycle/SKILL.md) owns that rule.
 6. **After the captain closes a board, a bare call deliberately refuses to reopen it.**
    `lavish-axi <file> --reopen` restores a fresh responsive tab, and it is for when the captain asks for further review or something important needs their visual attention, never for reopening uninvited.
